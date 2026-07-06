@@ -17,6 +17,8 @@
     "spores": "tsx apps/sporesd/src/cli.ts",
     "doctor": "bun run spores -- doctor",
     "status": "bun run spores -- status",
+    "targets": "bun run spores -- targets",
+    "recorder-helper": "tsx apps/recorder-helper/src/index.ts",
     "smoke": "tsx apps/sporesd/src/smoke.ts",
     "mcp": "tsx apps/sporesd/src/index.ts"
   },

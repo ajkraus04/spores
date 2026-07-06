@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   ArtifactRefSchema,
+  RecorderHelperStatusSchema,
+  RecorderHelperTargetsSchema,
   RunManifestSchema,
   SporesErrorSchema,
   TimelineSchema,
@@ -48,6 +50,8 @@ describe("sporesd MCP stdio e2e", () => {
 
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
+        "recorder_helper_list_targets",
+        "recorder_helper_status",
         "session_recording_append_event",
         "session_recording_get_artifact",
         "session_recording_get_timeline",
@@ -61,6 +65,38 @@ describe("sporesd MCP stdio e2e", () => {
         await client.callTool({ name: "spores_doctor", arguments: {} }),
       );
       expect(doctor).toMatchObject({ ok: true, recorder: "fake", nativeCapture: false, rootDir: runsRoot });
+      expect(doctor).toMatchObject({ helper: { available: true, targetCount: 3 } });
+
+      const helperStatus = RecorderHelperStatusSchema.parse(
+        expectOk(
+          await client.callTool({
+            name: "recorder_helper_status",
+            arguments: {},
+          }),
+        ),
+      );
+      expect(helperStatus).toMatchObject({
+        available: true,
+        command: bunCommand(),
+        args: ["run", "--silent", "recorder-helper", "--", "--stdio"],
+        targetCount: 3,
+        capabilities: {
+          listTargets: true,
+          startSession: false,
+          stopSession: false,
+        },
+      });
+
+      const helperTargets = RecorderHelperTargetsSchema.parse(
+        expectOk(
+          await client.callTool({
+            name: "recorder_helper_list_targets",
+            arguments: {},
+          }),
+        ),
+      );
+      expect(helperTargets.status).toMatchObject({ available: true, targetCount: 3 });
+      expect(helperTargets.targets.map((target) => target.kind)).toEqual(["display", "app", "window"]);
 
       const started = RunManifestSchema.parse(
         expectOk(
