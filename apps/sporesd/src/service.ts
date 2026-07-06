@@ -58,8 +58,17 @@ export class SporesService {
     return this.recorder.start(input);
   }
 
-  status(input: z.infer<typeof StatusInputSchema>) {
-    return this.recorder.status(input.runId);
+  async status(input: z.infer<typeof StatusInputSchema>) {
+    if (input.runId) {
+      return this.store.readManifest(input.runId);
+    }
+
+    const active = await this.recorder.status();
+    if (active.status !== "idle") {
+      return active;
+    }
+
+    return (await this.store.readLatestManifest()) ?? active;
   }
 
   stop(input: z.infer<typeof StopInputSchema>) {

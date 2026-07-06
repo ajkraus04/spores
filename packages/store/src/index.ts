@@ -104,6 +104,27 @@ export class RunStore {
     return RunManifestSchema.parse(JSON.parse(raw));
   }
 
+  async listRunIds(): Promise<string[]> {
+    return safeReadDirNames(this.rootDir);
+  }
+
+  async listManifests(): Promise<RunManifest[]> {
+    const runIds = await this.listRunIds();
+    const manifests = await Promise.all(
+      runIds.map((runId) => this.readManifest(runId).catch(() => undefined)),
+    );
+    return manifests.filter((manifest): manifest is RunManifest => manifest !== undefined);
+  }
+
+  async readLatestManifest(): Promise<RunManifest | undefined> {
+    const manifests = await this.listManifests();
+    return manifests.sort((left, right) => {
+      const rightTime = Date.parse(right.updatedAt);
+      const leftTime = Date.parse(left.updatedAt);
+      return rightTime - leftTime;
+    })[0];
+  }
+
   async writeManifest(manifest: RunManifest): Promise<void> {
     await mkdir(manifest.paths.runDir, { recursive: true });
     await writeFile(manifest.paths.manifest, `${JSON.stringify(manifest, null, 2)}\n`);

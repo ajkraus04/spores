@@ -30,20 +30,38 @@ native capture is introduced.
 Run the checks:
 
 ```bash
-npm run typecheck
-npm test
-npm run test:e2e
-npm run smoke
+bun run typecheck
+bun run test
+bun run test:e2e
+bun run smoke
 ```
 
 Or run the full local gate:
 
 ```bash
-npm run verify
+bun run verify
 ```
 
 Start the MCP server over stdio:
 
 ```bash
-npm run mcp
+bun run mcp
+```
+
+## Milestone 2
+
+The next slice adds a CLI for local health and status checks while preserving
+MCP as the primary agent interface.
+
+Run local diagnostics:
+
+```bash
+bun run --silent spores -- doctor --json
+bun run --silent spores -- status --json
+```
+
+Launch the MCP server over clean stdio:
+
+```bash
+bun run mcp
 ```
