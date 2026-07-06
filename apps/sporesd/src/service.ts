@@ -1,18 +1,17 @@
 import { z } from "zod";
 
 import { FakeRecorder } from "@spores/fake-recorder";
-import { SporesEventSchema } from "@spores/schema";
+import { SporesEventSchema, TargetRefSchema } from "@spores/schema";
 import { RunStore } from "@spores/store";
+
+const TargetInputSchema = TargetRefSchema.partial().extend({
+  mode: z.enum(["fake", "picker"]).default("fake"),
+});
 
 export const StartRecordingInputSchema = z.object({
   purpose: z.string().optional(),
   runId: z.string().optional(),
-  target: z
-    .object({
-      mode: z.enum(["fake", "picker"]).default("fake"),
-      targetId: z.string().optional(),
-    })
-    .optional(),
+  target: TargetInputSchema.optional(),
 });
 
 export const StatusInputSchema = z.object({

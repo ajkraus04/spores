@@ -32,7 +32,14 @@ Run the checks:
 ```bash
 npm run typecheck
 npm test
+npm run test:e2e
 npm run smoke
+```
+
+Or run the full local gate:
+
+```bash
+npm run verify
 ```
 
 Start the MCP server over stdio:
