@@ -1,0 +1,13 @@
+{
+  "name": "@spores/fake-recorder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@spores/schema": "0.1.0",
+    "@spores/store": "0.1.0"
+  }
+}

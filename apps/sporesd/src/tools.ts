@@ -1,0 +1,98 @@
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
+
+import {
+  AppendEventInputSchema,
+  ArtifactInputSchema,
+  SporesService,
+  StartRecordingInputSchema,
+  StatusInputSchema,
+  StopInputSchema,
+  TimelineInputSchema,
+} from "./service.js";
+
+type JsonObject = Record<string, unknown>;
+
+export type ToolDefinition = {
+  name: string;
+  description: string;
+  inputSchema: z.ZodType;
+  execute(input: never): Promise<unknown>;
+  readOnly?: boolean;
+};
+
+export function createToolDefinitions(service: SporesService) {
+  return [
+    {
+      name: "spores_doctor",
+      description: "Return local Spores health and fake-recorder status.",
+      inputSchema: z.object({}),
+      readOnly: true,
+      execute: async () => service.doctor(),
+    },
+    {
+      name: "session_recording_start",
+      description: "Start a fake recording session and create a run bundle.",
+      inputSchema: StartRecordingInputSchema,
+      execute: async (input) => service.start(input),
+    },
+    {
+      name: "session_recording_status",
+      description: "Return the active or requested recording status.",
+      inputSchema: StatusInputSchema,
+      readOnly: true,
+      execute: async (input) => service.status(input),
+    },
+    {
+      name: "session_recording_stop",
+      description: "Stop the active or requested recording session.",
+      inputSchema: StopInputSchema,
+      execute: async (input) => service.stop(input),
+    },
+    {
+      name: "session_recording_append_event",
+      description: "Append an agent event to the active run's event stream.",
+      inputSchema: AppendEventInputSchema,
+      execute: async (input) => service.appendEvent(input),
+    },
+    {
+      name: "session_recording_get_timeline",
+      description: "Read the normalized timeline for a run bundle.",
+      inputSchema: TimelineInputSchema,
+      readOnly: true,
+      execute: async (input) => service.timeline(input),
+    },
+    {
+      name: "session_recording_get_artifact",
+      description: "Return artifact metadata and small text artifact content.",
+      inputSchema: ArtifactInputSchema,
+      readOnly: true,
+      execute: async (input) => service.artifact(input),
+    },
+  ] satisfies ToolDefinition[];
+}
+
+export function mcpOk(value: unknown): CallToolResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+    structuredContent: toStructuredContent(value),
+  };
+}
+
+export function mcpError(error: unknown): CallToolResult {
+  const value = error instanceof Error
+    ? { error: "internal_error", message: error.message, retriable: false, requiresUserAction: false }
+    : { error: "internal_error", message: String(error), retriable: false, requiresUserAction: false };
+  return {
+    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+    structuredContent: value,
+    isError: true,
+  };
+}
+
+function toStructuredContent(value: unknown): JsonObject {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as JsonObject;
+  }
+  return { value };
+}

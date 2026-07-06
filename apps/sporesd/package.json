@@ -1,0 +1,16 @@
+{
+  "name": "@spores/sporesd",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "sporesd": "./src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@spores/fake-recorder": "0.1.0",
+    "@spores/schema": "0.1.0",
+    "@spores/store": "0.1.0",
+    "zod": "^4.4.3"
+  }
+}
