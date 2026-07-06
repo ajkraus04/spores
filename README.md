@@ -45,7 +45,7 @@ bun run verify
 Start the MCP server over stdio:
 
 ```bash
-bun run mcp
+bun run --silent mcp
 ```
 
 ## Milestone 2
@@ -63,5 +63,5 @@ bun run --silent spores -- status --json
 Launch the MCP server over clean stdio:
 
 ```bash
-bun run mcp
+bun run --silent mcp
 ```

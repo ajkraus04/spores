@@ -24,16 +24,18 @@ describe("spores CLI e2e", () => {
   it("prints doctor and idle status as JSON from an external CLI process", async () => {
     const runsRoot = path.join(tempDir, "runs");
 
-    const doctor = JSON.parse(await runCli(["doctor", "--json"], runsRoot));
+    const doctor = JSON.parse(await runSporesCli(["doctor", "--json"], runsRoot));
     expect(doctor).toMatchObject({
       ok: true,
       recorder: "fake",
       nativeCapture: false,
       rootDir: runsRoot,
     });
+    expect(JSON.parse(await runPackageScript("doctor", ["--json"], runsRoot))).toEqual(doctor);
 
-    const status = JSON.parse(await runCli(["status", "--json"], runsRoot));
+    const status = JSON.parse(await runSporesCli(["status", "--json"], runsRoot));
     expect(status).toEqual({ status: "idle" });
+    expect(JSON.parse(await runPackageScript("status", ["--json"], runsRoot))).toEqual(status);
   });
 
   it("returns the latest persisted run status across CLI processes", async () => {
@@ -51,7 +53,7 @@ describe("spores CLI e2e", () => {
     });
     await service.stop({ runId: started.runId });
 
-    const latest = RunManifestSchema.parse(JSON.parse(await runCli(["status", "--json"], runsRoot)));
+    const latest = RunManifestSchema.parse(JSON.parse(await runSporesCli(["status", "--json"], runsRoot)));
     expect(latest).toMatchObject({
       runId: "run_cli_e2e_001",
       status: "complete",
@@ -60,14 +62,19 @@ describe("spores CLI e2e", () => {
     });
 
     const explicit = RunManifestSchema.parse(
-      JSON.parse(await runCli(["status", "--json", "--run-id", "run_cli_e2e_001"], runsRoot)),
+      JSON.parse(await runSporesCli(["status", "--json", "--run-id", "run_cli_e2e_001"], runsRoot)),
     );
     expect(explicit).toEqual(latest);
+    expect(
+      RunManifestSchema.parse(
+        JSON.parse(await runPackageScript("status", ["--json", "--run-id", "run_cli_e2e_001"], runsRoot)),
+      ),
+    ).toEqual(latest);
   });
 
   it("returns structured JSON errors for failed CLI commands", async () => {
     const runsRoot = path.join(tempDir, "runs");
-    const result = await runCliExpectFailure(["status", "--json", "--run-id", "run_missing"], runsRoot);
+    const result = await runSporesCliExpectFailure(["status", "--json", "--run-id", "run_missing"], runsRoot);
     const error = SporesErrorSchema.parse(JSON.parse(result.stdout));
 
     expect(result.code).toBe(1);
@@ -80,17 +87,25 @@ describe("spores CLI e2e", () => {
   });
 });
 
-async function runCli(args: string[], runsRoot: string): Promise<string> {
-  const { stdout } = await execFileAsync(tsxBinaryPath(), ["apps/sporesd/src/cli.ts", ...args], {
+async function runSporesCli(args: string[], runsRoot: string): Promise<string> {
+  const { stdout } = await execFileAsync(bunCommand(), ["run", "--silent", "spores", "--", ...args], {
     cwd: repoRoot(),
     env: childEnv({ SPORES_RUNS_ROOT: runsRoot }),
   });
   return stdout;
 }
 
-async function runCliExpectFailure(args: string[], runsRoot: string): Promise<{ code: number; stdout: string; stderr: string }> {
+async function runPackageScript(script: "doctor" | "status", args: string[], runsRoot: string): Promise<string> {
+  const { stdout } = await execFileAsync(bunCommand(), ["run", "--silent", script, ...args], {
+    cwd: repoRoot(),
+    env: childEnv({ SPORES_RUNS_ROOT: runsRoot }),
+  });
+  return stdout;
+}
+
+async function runSporesCliExpectFailure(args: string[], runsRoot: string): Promise<{ code: number; stdout: string; stderr: string }> {
   try {
-    await execFileAsync(tsxBinaryPath(), ["apps/sporesd/src/cli.ts", ...args], {
+    await execFileAsync(bunCommand(), ["run", "--silent", "spores", "--", ...args], {
       cwd: repoRoot(),
       env: childEnv({ SPORES_RUNS_ROOT: runsRoot }),
     });
@@ -115,9 +130,8 @@ function repoRoot(): string {
   return process.cwd();
 }
 
-function tsxBinaryPath(): string {
-  const binaryName = process.platform === "win32" ? "tsx.cmd" : "tsx";
-  return path.join(repoRoot(), "node_modules", ".bin", binaryName);
+function bunCommand(): string {
+  return process.platform === "win32" ? "bun.exe" : "bun";
 }
 
 function childEnv(overrides: Record<string, string>): NodeJS.ProcessEnv {
