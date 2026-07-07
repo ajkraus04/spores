@@ -100,11 +100,25 @@ export class RecorderHelperClient {
   }
 
   async permissionsStatus(): Promise<PermissionBrokerStatus> {
-    return PermissionBrokerStatusSchema.parse(await this.request("permissions_status"));
+    try {
+      return PermissionBrokerStatusSchema.parse(await this.request("permissions_status"));
+    } catch (error) {
+      return this.unavailablePermissionStatus(error);
+    }
   }
 
   async requestPermissions(): Promise<PermissionRequestResult> {
-    return PermissionRequestResultSchema.parse(await this.request("permissions_request"));
+    try {
+      return PermissionRequestResultSchema.parse(await this.request("permissions_request"));
+    } catch (error) {
+      const status = this.unavailablePermissionStatus(error);
+      return PermissionRequestResultSchema.parse({
+        status,
+        opened: false,
+        message: "Recorder helper is unavailable; permissions cannot be requested until the helper launches.",
+        actions: [],
+      });
+    }
   }
 
   async startSession(input: RecorderHelperSessionInput): Promise<RecorderHelperSession> {
@@ -137,6 +151,73 @@ export class RecorderHelperClient {
       error: {
         code: "helper_unavailable",
         message: error instanceof Error ? error.message : String(error),
+        retriable: true,
+        requiresUserAction: false,
+      },
+    });
+  }
+
+  private unavailablePermissionStatus(error: unknown): PermissionBrokerStatus {
+    const message = error instanceof Error ? error.message : String(error);
+    const requiredReason = `Recorder helper is unavailable: ${message}`;
+    return PermissionBrokerStatusSchema.parse({
+      platform: process.platform,
+      mode: "deterministic",
+      snapshot: {
+        platform: process.platform,
+        screenRecording: "degraded",
+        accessibility: "degraded",
+        inputMonitoring: "not_requested",
+        microphone: "not_requested",
+        systemAudio: "not_requested",
+        requiresUserAction: true,
+      },
+      capabilities: [
+        {
+          permission: "screenRecording",
+          label: "Screen Recording",
+          status: "degraded",
+          required: true,
+          canRequest: false,
+          reason: requiredReason,
+        },
+        {
+          permission: "accessibility",
+          label: "Accessibility",
+          status: "degraded",
+          required: true,
+          canRequest: false,
+          reason: requiredReason,
+        },
+        {
+          permission: "inputMonitoring",
+          label: "Input Monitoring",
+          status: "not_requested",
+          required: false,
+          canRequest: false,
+          reason: "Optional richer keyboard metadata for future native capture.",
+        },
+        {
+          permission: "microphone",
+          label: "Microphone",
+          status: "not_requested",
+          required: false,
+          canRequest: false,
+          reason: "Optional narration capture; not used by the current helper-backed lifecycle.",
+        },
+        {
+          permission: "systemAudio",
+          label: "System Audio",
+          status: "not_requested",
+          required: false,
+          canRequest: false,
+          reason: "Optional future system-audio capture.",
+        },
+      ],
+      requiresUserAction: true,
+      error: {
+        code: "helper_unavailable",
+        message,
         retriable: true,
         requiresUserAction: false,
       },

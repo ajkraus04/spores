@@ -304,6 +304,68 @@ describe("sporesd MCP stdio e2e", () => {
         requiresUserAction: true,
       });
       expect(error.message).toContain("Screen Recording");
+      await expect(stat(path.join(runsRoot, "run_missing_permission_e2e_001", "manifest.json"))).rejects.toThrow();
+    } catch (error) {
+      if (stderr.length > 0) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}\n\nsporesd stderr:\n${stderr}`);
+      }
+      throw error;
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  }, 20_000);
+
+  it("reports helper launch failures through permission tools and recording start", async () => {
+    const runsRoot = path.join(tempDir, "runs");
+    const client = new Client({ name: "spores-helper-unavailable-e2e-test", version: "0.1.0" });
+    const transport = new StdioClientTransport({
+      command: bunCommand(),
+      args: ["run", "--silent", "mcp"],
+      cwd: repoRoot(),
+      env: childEnv({
+        SPORES_RUNS_ROOT: runsRoot,
+        SPORES_RECORDER_HELPER_COMMAND: path.join(tempDir, "missing-helper"),
+      }),
+      stderr: "pipe",
+    });
+    let stderr = "";
+    transport.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    try {
+      await client.connect(transport);
+
+      const permissions = PermissionBrokerStatusSchema.parse(
+        expectOk(
+          await client.callTool({
+            name: "recorder_permissions_status",
+            arguments: {},
+          }),
+        ),
+      );
+      expect(permissions).toMatchObject({
+        requiresUserAction: true,
+        error: {
+          code: "helper_unavailable",
+          retriable: true,
+          requiresUserAction: false,
+        },
+      });
+
+      const start = await client.callTool({
+        name: "session_recording_start",
+        arguments: {
+          runId: "run_helper_unavailable_e2e_001",
+          purpose: "helper unavailable e2e",
+        },
+      });
+      const error = SporesErrorSchema.parse(expectError(start));
+      expect(error).toMatchObject({
+        error: "helper_unavailable",
+        retriable: true,
+        requiresUserAction: false,
+      });
     } catch (error) {
       if (stderr.length > 0) {
         throw new Error(`${error instanceof Error ? error.message : String(error)}\n\nsporesd stderr:\n${stderr}`);

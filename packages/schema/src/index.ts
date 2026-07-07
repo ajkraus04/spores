@@ -124,6 +124,14 @@ export const PermissionBrokerStatusSchema = z.object({
   snapshot: PermissionSnapshotSchema,
   capabilities: z.array(PermissionCapabilitySchema),
   requiresUserAction: z.boolean(),
+  error: z
+    .object({
+      code: z.string(),
+      message: z.string(),
+      retriable: z.boolean(),
+      requiresUserAction: z.boolean(),
+    })
+    .optional(),
 });
 
 export const PermissionRequestResultSchema = z.object({

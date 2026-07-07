@@ -303,6 +303,14 @@ export class SporesService {
 
   private async ensureRequiredPermissions(): Promise<PermissionBrokerStatus> {
     const status = await this.permissionsStatus();
+    if (status.error) {
+      throw new SporesServiceError({
+        code: status.error.code,
+        message: status.error.message,
+        retriable: status.error.retriable,
+        requiresUserAction: status.error.requiresUserAction,
+      });
+    }
     if (!status.requiresUserAction) {
       return status;
     }
