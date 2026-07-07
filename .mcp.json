@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "spores": {
+      "command": "bun",
+      "args": ["run", "--silent", "mcp"]
+    }
+  }
+}

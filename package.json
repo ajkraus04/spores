@@ -14,13 +14,13 @@
     "test": "vitest run",
     "test:e2e": "vitest run tests/e2e",
     "verify": "bun run typecheck && bun run test && bun run test:e2e && bun run smoke",
-    "spores": "tsx apps/sporesd/src/cli.ts",
+    "spores": "node node_modules/tsx/dist/cli.mjs apps/sporesd/src/cli.ts",
     "doctor": "bun run spores -- doctor",
     "status": "bun run spores -- status",
     "targets": "bun run spores -- targets",
-    "recorder-helper": "tsx apps/recorder-helper/src/index.ts",
-    "smoke": "tsx apps/sporesd/src/smoke.ts",
-    "mcp": "tsx apps/sporesd/src/index.ts"
+    "recorder-helper": "node node_modules/tsx/dist/cli.mjs apps/recorder-helper/src/index.ts",
+    "smoke": "node node_modules/tsx/dist/cli.mjs apps/sporesd/src/smoke.ts",
+    "mcp": "node node_modules/tsx/dist/cli.mjs apps/sporesd/src/index.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

@@ -517,16 +517,34 @@ export async function runStdio(): Promise<number> {
 }
 
 async function handleRequest(line: string) {
+  let requestId = "unknown";
   try {
-    const request = HelperRequestSchema.parse(JSON.parse(line));
-    return {
-      id: request.id,
-      ok: true as const,
-      result: await handleParsedRequest(request),
-    };
+    const raw = JSON.parse(line) as unknown;
+    if (raw && typeof raw === "object" && "id" in raw && typeof raw.id === "string") {
+      requestId = raw.id;
+    }
+    const request = HelperRequestSchema.parse(raw);
+    try {
+      return {
+        id: request.id,
+        ok: true as const,
+        result: await handleParsedRequest(request),
+      };
+    } catch (error) {
+      return {
+        id: request.id,
+        ok: false as const,
+        error: {
+          code: "handler_error",
+          message: error instanceof Error ? error.message : String(error),
+          retriable: true,
+          requiresUserAction: false,
+        },
+      };
+    }
   } catch (error) {
     return {
-      id: "unknown",
+      id: requestId,
       ok: false as const,
       error: {
         code: "invalid_request",
@@ -539,15 +557,18 @@ async function handleRequest(line: string) {
 }
 
 async function handleParsedRequest(request: HelperRequest) {
-  const targets = await listTargets();
   switch (request.method) {
-    case "doctor":
+    case "doctor": {
+      const targets = await listTargets();
       return createHelperStatus(targets.length);
-    case "list_targets":
+    }
+    case "list_targets": {
+      const targets = await listTargets();
       return RecorderHelperTargetsSchema.parse({
         status: createHelperStatus(targets.length),
         targets,
       });
+    }
     case "permissions_status":
       return createPermissionStatus();
     case "permissions_request":
