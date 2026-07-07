@@ -1,33 +1,283 @@
 # Spores
 
-Spores is an MCP-first desktop recording and replay system for agents. It
-records what happened on a computer, captures enough structured event data to
-explain how it happened, and exposes the result through MCP tools and local
-APIs.
+Spores is an MCP-first desktop recording system for agents. It records what
+happened on a computer, captures structured event data explaining the run, and
+writes a local evidence bundle with timelines, frames, permissions, target
+metadata, and video artifacts.
 
-The product is intentionally not tied to Playwright or any one automation
-framework. Browser automation, native app testing, shell-driven workflows,
-desktop-control agents, and human-guided recordings should all produce the
-same evidence bundle shape.
+Spores is intentionally automation-framework agnostic. It can be used by
+browser agents, native desktop agents, shell-driven workflows, and human-guided
+test runs. Playwright is not required.
 
-## Planning Status
+## Requirements
 
-This repository currently contains the service architecture plan. Implementation
-should follow the service boundaries in `docs/services/` rather than starting
-with a single all-purpose recorder.
+- Bun `1.3.12`
+- macOS for native screen recording
+- Screen Recording and Accessibility permissions for the terminal/app that
+  launches Spores
 
-Start here:
+Install dependencies:
 
-- [System architecture](docs/architecture.md)
-- [Service index](docs/services/README.md)
+```bash
+bun install
+```
 
-## Milestone 1
+Run the full local gate:
 
-The first vertical slice is implemented as an MCP host with a fake recorder
-backend. It proves the agent-facing contract and local run bundle format before
-native capture is introduced.
+```bash
+bun run verify
+```
 
-Run the checks:
+## Start The MCP Server
+
+Agents should use Spores through MCP over stdio:
+
+```bash
+bun run --silent mcp
+```
+
+Example MCP server config:
+
+```json
+{
+  "mcpServers": {
+    "spores": {
+      "command": "bun",
+      "args": ["run", "--silent", "mcp"],
+      "cwd": "/path/to/spores"
+    }
+  }
+}
+```
+
+Use `SPORES_RUNS_ROOT` to choose where run bundles are written:
+
+```bash
+SPORES_RUNS_ROOT=/tmp/spores-runs bun run --silent mcp
+```
+
+## Recommended Agent Flow
+
+Check local readiness first:
+
+```json
+{
+  "name": "recorder_ready",
+  "arguments": {}
+}
+```
+
+Resolve a target when the agent needs to inspect what will be captured:
+
+```json
+{
+  "name": "recorder_target_resolve",
+  "arguments": {
+    "kind": "window",
+    "bundleId": "com.google.Chrome",
+    "titleIncludes": "Calendar"
+  }
+}
+```
+
+For most tasks, use a one-shot recording tool. It resolves the target, records,
+stops, and returns the artifact and timeline summary in one response.
+
+## Common Recording Calls
+
+Record the frontmost matching Chrome window:
+
+```json
+{
+  "name": "session_recording_record_window",
+  "arguments": {
+    "bundleId": "com.google.Chrome",
+    "seconds": 5
+  }
+}
+```
+
+Record a window by title:
+
+```json
+{
+  "name": "session_recording_record_window",
+  "arguments": {
+    "app": "Chrome",
+    "titleIncludes": "FOX Sports",
+    "seconds": 5
+  }
+}
+```
+
+Record an app's visible bounds:
+
+```json
+{
+  "name": "session_recording_record_app",
+  "arguments": {
+    "bundleId": "com.google.Chrome",
+    "seconds": 10
+  }
+}
+```
+
+Record explicit screen coordinates:
+
+```json
+{
+  "name": "session_recording_record_region",
+  "arguments": {
+    "bounds": { "x": 0, "y": 0, "width": 1280, "height": 720 },
+    "seconds": 5
+  }
+}
+```
+
+Record the frontmost helper-listed window:
+
+```json
+{
+  "name": "session_recording_record_active_window",
+  "arguments": {
+    "seconds": 5
+  }
+}
+```
+
+## Unknown Duration Recordings
+
+If the agent does not know the duration up front, start with a safety cap:
+
+```json
+{
+  "name": "session_recording_begin",
+  "arguments": {
+    "target": {
+      "kind": "window",
+      "bundleId": "com.google.Chrome"
+    },
+    "safetyCapSeconds": 30
+  }
+}
+```
+
+Then stop when the task is done:
+
+```json
+{
+  "name": "session_recording_stop",
+  "arguments": {
+    "runId": "run_id_from_begin"
+  }
+}
+```
+
+Current native capture uses macOS `screencapture`, which finalizes timed video
+when the safety cap completes. `session_recording_stop` is still the right agent
+API, but for native recordings it may wait for the capped artifact to finish.
+True arbitrary early-stop native recording will require a different encoder
+backend.
+
+## Target Discovery
+
+List capturable displays, apps, and windows:
+
+```json
+{
+  "name": "recorder_helper_list_targets",
+  "arguments": {}
+}
+```
+
+Targets include screen coordinates:
+
+```json
+{
+  "targetId": "window:480794",
+  "kind": "window",
+  "bounds": { "x": -203, "y": -1060, "width": 930, "height": 1040 },
+  "zOrder": 2,
+  "app": {
+    "bundleId": "com.google.Chrome",
+    "name": "Google Chrome"
+  },
+  "window": {
+    "id": "480794",
+    "title": "Example tab title",
+    "bounds": { "x": -203, "y": -1060, "width": 930, "height": 1040 }
+  }
+}
+```
+
+macOS exposes windows, not browser tabs, as native capture targets. For browser
+tabs, select the Chrome window by title, URL-derived title text, or bundle ID.
+
+## Output
+
+Each recording writes a run bundle under `SPORES_RUNS_ROOT` or the default local
+run directory. A bundle contains:
+
+- `manifest.json`: run metadata, selected target, permissions, artifact refs
+- `events.ndjson`: ordered recording and agent events
+- `frames.ndjson`: frame references and video-time linkage
+- `artifacts/capture.mp4`: native video artifact
+- `native-capture.json`: native capture backend state for recovery/debugging
+
+Video artifacts include file path, media type, bytes, SHA-256, time range, and
+redaction state. The final frame links to the video artifact ID.
+
+## Permissions
+
+Inspect permission state:
+
+```bash
+bun run --silent spores -- permissions status --json
+```
+
+Get user-action guidance for missing permissions:
+
+```bash
+bun run --silent spores -- permissions request --json
+```
+
+The MCP equivalents are:
+
+```json
+{ "name": "recorder_permissions_status", "arguments": {} }
+```
+
+```json
+{ "name": "recorder_permissions_request", "arguments": {} }
+```
+
+For tests, permission states can be simulated:
+
+```bash
+SPORES_PERMISSION_SCREEN_RECORDING=missing bun run --silent spores -- permissions status --json
+```
+
+## CLI
+
+The CLI is useful for local diagnostics:
+
+```bash
+bun run --silent spores -- doctor --json
+bun run --silent spores -- status --json
+bun run --silent spores -- targets --json
+bun run --silent spores -- permissions status --json
+```
+
+Run the recorder helper directly:
+
+```bash
+bun run --silent recorder-helper
+bun run --silent recorder-helper -- --list-targets
+```
+
+## Development
+
+Run focused checks:
 
 ```bash
 bun run typecheck
@@ -36,108 +286,10 @@ bun run test:e2e
 bun run smoke
 ```
 
-Or run the full local gate:
+Run everything:
 
 ```bash
 bun run verify
 ```
 
-Start the MCP server over stdio:
-
-```bash
-bun run --silent mcp
-```
-
-## Milestone 2
-
-The next slice adds a CLI for local health and status checks while preserving
-MCP as the primary agent interface.
-
-Run local diagnostics:
-
-```bash
-bun run --silent spores -- doctor --json
-bun run --silent spores -- status --json
-bun run --silent spores -- targets --json
-```
-
-Launch the MCP server over clean stdio:
-
-```bash
-bun run --silent mcp
-```
-
-## Milestone 3
-
-The next slice adds the recorder-helper launch boundary. The helper runs as a
-separate stdio process and exposes deterministic health and target-listing
-responses while native capture is still out of scope.
-
-Run the helper directly:
-
-```bash
-bun run --silent recorder-helper
-bun run --silent recorder-helper -- --list-targets
-```
-
-Inspect helper launch through `sporesd`:
-
-```bash
-bun run --silent spores -- doctor --json
-bun run --silent spores -- targets --json
-```
-
-## Milestone 4
-
-The recording lifecycle now runs through the recorder-helper boundary by
-default. The helper writes deterministic lifecycle events, frame rows, and a
-synthetic capture artifact into the run bundle. The fake recorder remains
-available only when explicitly configured with `SPORES_RECORDER_BACKEND=fake`.
-
-Run the helper-backed verification gate:
-
-```bash
-bun run verify
-```
-
-## Milestone 5
-
-The helper now exposes a deterministic permission broker over the same stdio
-boundary used for recording. Agents can inspect required and optional capture
-permissions before starting, request user-action guidance, and receive
-machine-readable `missing_permission` errors instead of silent degraded
-recordings.
-
-Inspect permission state:
-
-```bash
-bun run --silent spores -- permissions status --json
-bun run --silent spores -- permissions request --json
-```
-
-Simulate a missing permission for tests:
-
-```bash
-SPORES_PERMISSION_SCREEN_RECORDING=missing bun run --silent spores -- permissions status --json
-```
-
-## Milestone 6
-
-The helper can now create real timed macOS screen-recording artifacts. Agents
-request native capture per session, and the run bundle receives a
-`capture.mov` video artifact with frame linkage, SHA-256 bytes, timing metadata,
-and the same structured event stream as synthetic recordings.
-
-Native capture is opt-in so deterministic tests and permission-denied systems
-can keep using synthetic artifacts:
-
-```json
-{
-  "target": { "targetId": "display:main" },
-  "capture": { "mode": "native", "maxDurationSeconds": 1 }
-}
-```
-
-The current native path uses macOS `screencapture -v -V`. It is a timed capture
-slice; early termination is intentionally not used because macOS does not leave
-a valid movie file when this command is interrupted.
+Service design notes live in [`docs/services/`](docs/services/).
