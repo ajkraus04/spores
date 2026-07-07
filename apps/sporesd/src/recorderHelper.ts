@@ -4,6 +4,8 @@ import { z } from "zod";
 
 import {
   RecorderHelperStatus,
+  RecorderHelperSession,
+  RecorderHelperSessionSchema,
   RecorderHelperStatusSchema,
   RecorderHelperTargets,
   RecorderHelperTargetsSchema,
@@ -15,6 +17,22 @@ export type RecorderHelperConfig = {
   cwd: string;
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
+};
+
+export type RecorderHelperSessionInput = {
+  runId: string;
+  sessionId: string;
+  target: unknown;
+  paths: {
+    runDir: string;
+    manifest: string;
+    events: string;
+    frames: string;
+    artifactsDir: string;
+  };
+  purpose?: string;
+  eventCount: number;
+  frameCount: number;
 };
 
 const HelperResponseSchema = z.discriminatedUnion("ok", [
@@ -77,6 +95,18 @@ export class RecorderHelperClient {
     }
   }
 
+  async startSession(input: RecorderHelperSessionInput): Promise<RecorderHelperSession> {
+    return RecorderHelperSessionSchema.parse(await this.request("start_session", input));
+  }
+
+  async getSessionStatus(input: RecorderHelperSessionInput): Promise<RecorderHelperSession> {
+    return RecorderHelperSessionSchema.parse(await this.request("get_status", input));
+  }
+
+  async stopSession(input: RecorderHelperSessionInput): Promise<RecorderHelperSession> {
+    return RecorderHelperSessionSchema.parse(await this.request("stop_session", input));
+  }
+
   private normalizeStatus(status: RecorderHelperStatus): RecorderHelperStatus {
     return RecorderHelperStatusSchema.parse({
       ...status,
@@ -101,7 +131,10 @@ export class RecorderHelperClient {
     });
   }
 
-  private async request(method: "doctor" | "list_targets"): Promise<unknown> {
+  private async request(
+    method: "doctor" | "list_targets" | "start_session" | "get_status" | "stop_session",
+    params?: unknown,
+  ): Promise<unknown> {
     const id = `helper_${randomUUID().replaceAll("-", "")}`;
     const child = spawn(this.config.command, this.config.args, {
       cwd: this.config.cwd,
@@ -144,7 +177,7 @@ export class RecorderHelperClient {
       });
     });
 
-    child.stdin.end(`${JSON.stringify({ id, method })}\n`);
+    child.stdin.end(`${JSON.stringify({ id, method, params })}\n`);
     await close;
 
     const firstLine = stdout.split("\n").find((line) => line.trim().length > 0);

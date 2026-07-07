@@ -86,3 +86,16 @@ Inspect helper launch through `sporesd`:
 bun run --silent spores -- doctor --json
 bun run --silent spores -- targets --json
 ```
+
+## Milestone 4
+
+The recording lifecycle now runs through the recorder-helper boundary by
+default. The helper writes deterministic lifecycle events, frame rows, and a
+synthetic capture artifact into the run bundle. The fake recorder remains
+available only when explicitly configured with `SPORES_RECORDER_BACKEND=fake`.
+
+Run the helper-backed verification gate:
+
+```bash
+bun run verify
+```

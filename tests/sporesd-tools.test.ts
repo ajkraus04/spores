@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -53,5 +53,25 @@ describe("sporesd tool handlers", () => {
       status: "complete",
     });
     expect((result as { events: unknown[] }).events).toHaveLength(10);
+  });
+
+  it("uses fake recorder only when explicitly configured", async () => {
+    const service = createSporesService({
+      rootDir: path.join(tempDir, "runs"),
+      backend: "fake",
+    });
+
+    await expect(service.doctor()).resolves.toMatchObject({ recorder: "fake" });
+
+    const started = await service.start({
+      runId: "run_tools_fake_001",
+      purpose: "explicit fake fallback",
+    });
+    const stopped = await service.stop({ runId: started.runId });
+    const artifact = stopped.artifacts[0];
+
+    expect(stopped).toMatchObject({ runId: "run_tools_fake_001", status: "complete" });
+    expect(artifact).toBeDefined();
+    expect(await readFile(artifact!.path, "utf8")).toBe("Spores fake capture for run_tools_fake_001\n");
   });
 });

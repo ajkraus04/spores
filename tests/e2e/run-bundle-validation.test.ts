@@ -138,7 +138,7 @@ describe("run bundle e2e validation", () => {
     expect(artifactStat.isFile()).toBe(true);
     expect(artifact!.bytes).toBe(artifactBytes.byteLength);
     expect(artifact!.sha256).toBe(createHash("sha256").update(artifactBytes).digest("hex"));
-    expect(artifactBytes.toString("utf8")).toBe(`Spores fake capture for ${runId}\n`);
+    expect(artifactBytes.toString("utf8")).toBe(`Spores helper synthetic capture for ${runId}\n`);
   });
 });
 

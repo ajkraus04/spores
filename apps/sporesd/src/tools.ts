@@ -47,7 +47,7 @@ export function createToolDefinitions(service: SporesService) {
     },
     {
       name: "session_recording_start",
-      description: "Start a fake recording session and create a run bundle.",
+      description: "Start a helper-backed recording session and create a run bundle.",
       inputSchema: StartRecordingInputSchema,
       execute: async (input) => service.start(input),
     },

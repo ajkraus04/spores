@@ -27,7 +27,7 @@ describe("spores CLI e2e", () => {
     const doctor = JSON.parse(await runSporesCli(["doctor", "--json"], runsRoot));
     expect(doctor).toMatchObject({
       ok: true,
-      recorder: "fake",
+      recorder: "helper",
       nativeCapture: false,
       rootDir: runsRoot,
       helper: {
@@ -37,8 +37,8 @@ describe("spores CLI e2e", () => {
         targetCount: 3,
         capabilities: {
           listTargets: true,
-          startSession: false,
-          stopSession: false,
+          startSession: true,
+          stopSession: true,
         },
       },
     });
@@ -111,6 +111,37 @@ describe("spores CLI e2e", () => {
       requiresUserAction: false,
     });
     expect(error.message).toContain("manifest.json");
+  });
+
+  it("recovers stale recording manifests across process boundaries", async () => {
+    const runsRoot = path.join(tempDir, "runs");
+    const service = createSporesService({ rootDir: runsRoot });
+    const started = await service.start({
+      runId: "run_stale_cli_e2e_001",
+      purpose: "stale recording recovery e2e",
+    });
+
+    expect(started).toMatchObject({ runId: "run_stale_cli_e2e_001", status: "recording" });
+
+    const recovered = RunManifestSchema.parse(
+      JSON.parse(await runSporesCli(["status", "--json", "--run-id", started.runId], runsRoot)),
+    );
+    expect(recovered).toMatchObject({
+      runId: started.runId,
+      status: "partial",
+      eventCount: 7,
+      frameCount: 1,
+      error: {
+        code: "stale_recording",
+        retriable: false,
+        requiresUserAction: false,
+      },
+    });
+
+    expect(await service.store.readManifest(started.runId)).toMatchObject({
+      status: "partial",
+      error: { code: "stale_recording" },
+    });
   });
 
   it("reports helper launch failures as machine-readable degraded status", async () => {
