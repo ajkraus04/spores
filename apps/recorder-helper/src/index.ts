@@ -520,9 +520,7 @@ async function handleRequest(line: string) {
   let requestId = "unknown";
   try {
     const raw = JSON.parse(line) as unknown;
-    if (raw && typeof raw === "object" && "id" in raw && typeof raw.id === "string") {
-      requestId = raw.id;
-    }
+    requestId = extractRequestId(raw);
     const request = HelperRequestSchema.parse(raw);
     try {
       return {
@@ -535,9 +533,9 @@ async function handleRequest(line: string) {
         id: request.id,
         ok: false as const,
         error: {
-          code: "handler_error",
+          code: error instanceof z.ZodError ? "invalid_request" : "handler_error",
           message: error instanceof Error ? error.message : String(error),
-          retriable: true,
+          retriable: !(error instanceof z.ZodError),
           requiresUserAction: false,
         },
       };
@@ -554,6 +552,16 @@ async function handleRequest(line: string) {
       },
     };
   }
+}
+
+function extractRequestId(value: unknown): string {
+  if (value && typeof value === "object" && "id" in value) {
+    const id = (value as { id: unknown }).id;
+    if (typeof id === "string") {
+      return id;
+    }
+  }
+  return "unknown";
 }
 
 async function handleParsedRequest(request: HelperRequest) {

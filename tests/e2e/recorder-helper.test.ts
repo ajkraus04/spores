@@ -109,7 +109,7 @@ describe("recorder helper process e2e", () => {
     expect(request.actions.map((action) => action.permission)).toEqual(["screenRecording"]);
   });
 
-  it("preserves request ids when a valid helper request handler fails", async () => {
+  it("preserves request ids when helper request params are invalid", async () => {
     const response = await sendRawStdioRequest({
       id: "req_bad_start",
       method: "start_session",
@@ -120,11 +120,14 @@ describe("recorder helper process e2e", () => {
       id: "req_bad_start",
       ok: false,
       error: {
-        code: "handler_error",
-        retriable: true,
+        code: "invalid_request",
+        retriable: false,
         requiresUserAction: false,
       },
     });
+    if (response.ok) {
+      throw new Error("expected invalid start_session request to fail");
+    }
     expect(response.error.message).toContain("sessionId");
   });
 
@@ -231,13 +234,29 @@ async function sendStdioRequest(
 ): Promise<unknown> {
   const response = await sendRawStdioRequest(request, env);
   expect(response).toMatchObject({ id: request.id, ok: true });
+  if (!response.ok) {
+    throw new Error(`expected successful helper response: ${JSON.stringify(response.error)}`);
+  }
   return response.result;
 }
+
+type RawStdioResponse =
+  | { id: string; ok: true; result: unknown }
+  | {
+      id: string;
+      ok: false;
+      error: {
+        code: string;
+        message: string;
+        retriable: boolean;
+        requiresUserAction: boolean;
+      };
+    };
 
 async function sendRawStdioRequest(
   request: { id: string; method: string; params?: unknown },
   env: Record<string, string> = {},
-): Promise<any> {
+): Promise<RawStdioResponse> {
   const child = spawn(bunCommand(), ["run", "--silent", "recorder-helper", "--", "--stdio"], {
     cwd: repoRoot(),
     env: childEnv(env),
@@ -262,7 +281,10 @@ async function sendRawStdioRequest(
 
   const firstLine = stdout.split("\n").find((line) => line.trim().length > 0);
   expect(firstLine).toBeDefined();
-  return JSON.parse(firstLine!);
+  const response = JSON.parse(firstLine!);
+  expect(response).toHaveProperty("id");
+  expect(response).toHaveProperty("ok");
+  return response;
 }
 
 function repoRoot(): string {
