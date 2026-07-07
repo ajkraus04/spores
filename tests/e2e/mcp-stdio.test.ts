@@ -30,8 +30,8 @@ describe("sporesd MCP stdio e2e", () => {
     const runsRoot = path.join(tempDir, "runs");
     const client = new Client({ name: "spores-e2e-test", version: "0.1.0" });
     const transport = new StdioClientTransport({
-      command: tsxBinaryPath(),
-      args: ["apps/sporesd/src/index.ts"],
+      command: bunCommand(),
+      args: ["run", "--silent", "mcp"],
       cwd: repoRoot(),
       env: childEnv({ SPORES_RUNS_ROOT: runsRoot }),
       stderr: "pipe",
@@ -206,9 +206,8 @@ function repoRoot(): string {
   return process.cwd();
 }
 
-function tsxBinaryPath(): string {
-  const binaryName = process.platform === "win32" ? "tsx.cmd" : "tsx";
-  return path.join(repoRoot(), "node_modules", ".bin", binaryName);
+function bunCommand(): string {
+  return process.platform === "win32" ? "bun.exe" : "bun";
 }
 
 function childEnv(overrides: Record<string, string>): Record<string, string> {
