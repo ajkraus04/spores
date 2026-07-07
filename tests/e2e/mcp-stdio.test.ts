@@ -59,9 +59,17 @@ describe("sporesd MCP stdio e2e", () => {
         "recorder_helper_status",
         "recorder_permissions_request",
         "recorder_permissions_status",
+        "recorder_ready",
+        "recorder_target_resolve",
         "session_recording_append_event",
+        "session_recording_begin",
         "session_recording_get_artifact",
         "session_recording_get_timeline",
+        "session_recording_record_active_window",
+        "session_recording_record_app",
+        "session_recording_record_region",
+        "session_recording_record_target",
+        "session_recording_record_window",
         "session_recording_start",
         "session_recording_status",
         "session_recording_stop",
@@ -119,6 +127,40 @@ describe("sporesd MCP stdio e2e", () => {
         expect(target.window?.bounds).toBeDefined();
         expect(target.bounds).toEqual(target.window!.bounds);
       }
+
+      const ready = expectOk<{
+        ready: boolean;
+        targetCount: number;
+        timing: { unknownDurationMode: string; maxDurationSeconds: number };
+      }>(
+        await client.callTool({
+          name: "recorder_ready",
+          arguments: {},
+        }),
+      );
+      expect(ready).toMatchObject({
+        ready: true,
+        targetCount: helperTargets.targets.length,
+        timing: {
+          unknownDurationMode: "start_with_safety_cap_then_stop",
+          maxDurationSeconds: 30,
+        },
+      });
+
+      const resolvedDisplay = expectOk<{
+        selected: { targetId: string; kind: string };
+        confidence: string;
+        score: number;
+      }>(
+        await client.callTool({
+          name: "recorder_target_resolve",
+          arguments: { targetId: "display:main" },
+        }),
+      );
+      expect(resolvedDisplay).toMatchObject({
+        selected: { targetId: "display:main", kind: "display" },
+        confidence: "high",
+      });
 
       const permissions = PermissionBrokerStatusSchema.parse(
         expectOk(
@@ -269,7 +311,7 @@ describe("sporesd MCP stdio e2e", () => {
     } finally {
       await client.close().catch(() => undefined);
     }
-  }, 20_000);
+  }, 45_000);
 
   itIfNativeScreenCapture("records a native region screen movie through MCP stdio", async () => {
     const runId = "run_mcp_native_capture_e2e_001";
@@ -291,37 +333,34 @@ describe("sporesd MCP stdio e2e", () => {
     try {
       await client.connect(transport);
 
-      const started = RunManifestSchema.parse(
-        expectOk(
-          await client.callTool({
-            name: "session_recording_start",
-            arguments: {
-              runId,
-              purpose: "mcp native region capture e2e",
-              target: { targetId: "region:mcp:e2e", kind: "region", bounds },
-              capture: { mode: "native", maxDurationSeconds: 1 },
-            },
-          }),
-        ),
+      const recorded = expectOk<{
+        runId: string;
+        status: string;
+        target: unknown;
+        artifact: unknown;
+        timeline: { eventCount: number; frameCount: number; finalFrameArtifactId?: string };
+        timing: { requestedSeconds: number; durationKnown: boolean };
+      }>(
+        await client.callTool({
+          name: "session_recording_record_region",
+          arguments: {
+            runId,
+            purpose: "mcp native region capture e2e",
+            targetId: "region:mcp:e2e",
+            bounds,
+            seconds: 1,
+          },
+        }),
       );
-      expect(started).toMatchObject({
+      expect(recorded).toMatchObject({
         runId,
-        status: "recording",
+        status: "complete",
         target: { kind: "region", targetId: "region:mcp:e2e", bounds },
+        timing: { requestedSeconds: 1, durationKnown: true },
+        timeline: { eventCount: 9, frameCount: 2 },
       });
 
-      const stopped = RunManifestSchema.parse(
-        expectOk(
-          await client.callTool({
-            name: "session_recording_stop",
-            arguments: { runId },
-          }),
-        ),
-      );
-      expect(stopped).toMatchObject({ runId, status: "complete", eventCount: 9, frameCount: 2 });
-      expect(stopped.artifacts).toHaveLength(1);
-
-      const artifact = ArtifactRefSchema.parse(stopped.artifacts[0]);
+      const artifact = ArtifactRefSchema.parse(recorded.artifact);
       expect(artifact).toMatchObject({
         kind: "video",
         mediaType: "video/mp4",

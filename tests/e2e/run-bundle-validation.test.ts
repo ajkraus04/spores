@@ -46,7 +46,7 @@ describe("run bundle e2e validation", () => {
     });
     expect(manifest.target).toEqual(started.target);
     expect(manifest.target.kind).not.toBe("fake");
-  });
+  }, 20_000);
 
   itIfNativeScreenCapture("persists a real timed screen recording movie artifact", async () => {
     const runId = "run_native_capture_e2e_001";

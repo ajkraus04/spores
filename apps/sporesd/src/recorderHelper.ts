@@ -76,7 +76,7 @@ export class RecorderHelperClient {
       ],
       cwd: config.cwd ?? process.cwd(),
       env: config.env ?? env,
-      timeoutMs: config.timeoutMs ?? Number(env.SPORES_RECORDER_HELPER_TIMEOUT_MS ?? 5_000),
+      timeoutMs: config.timeoutMs ?? Number(env.SPORES_RECORDER_HELPER_TIMEOUT_MS ?? 45_000),
     };
   }
 

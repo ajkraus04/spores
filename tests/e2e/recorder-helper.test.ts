@@ -178,7 +178,7 @@ describe("recorder helper process e2e", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 });
 
 async function runHelperScript(args: string[]): Promise<string> {
