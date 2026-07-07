@@ -120,3 +120,24 @@ Simulate a missing permission for tests:
 ```bash
 SPORES_PERMISSION_SCREEN_RECORDING=missing bun run --silent spores -- permissions status --json
 ```
+
+## Milestone 6
+
+The helper can now create real timed macOS screen-recording artifacts. Agents
+request native capture per session, and the run bundle receives a
+`capture.mov` video artifact with frame linkage, SHA-256 bytes, timing metadata,
+and the same structured event stream as synthetic recordings.
+
+Native capture is opt-in so deterministic tests and permission-denied systems
+can keep using synthetic artifacts:
+
+```json
+{
+  "target": { "targetId": "display:main" },
+  "capture": { "mode": "native", "maxDurationSeconds": 1 }
+}
+```
+
+The current native path uses macOS `screencapture -v -V`. It is a timed capture
+slice; early termination is intentionally not used because macOS does not leave
+a valid movie file when this command is interrupted.

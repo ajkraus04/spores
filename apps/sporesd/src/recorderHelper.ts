@@ -35,6 +35,10 @@ export type RecorderHelperSessionInput = {
     artifactsDir: string;
   };
   purpose?: string;
+  capture?: {
+    mode?: "synthetic" | "native";
+    maxDurationSeconds?: number;
+  };
   eventCount: number;
   frameCount: number;
 };

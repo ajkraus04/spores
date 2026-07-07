@@ -21,10 +21,16 @@ const TargetInputSchema = TargetRefSchema.partial().extend({
   mode: z.enum(["fake", "picker"]).optional(),
 });
 
+const CaptureInputSchema = z.object({
+  mode: z.enum(["synthetic", "native"]).default("synthetic"),
+  maxDurationSeconds: z.number().int().min(1).max(30).default(2),
+});
+
 export const StartRecordingInputSchema = z.object({
   purpose: z.string().optional(),
   runId: z.string().optional(),
   target: TargetInputSchema.optional(),
+  capture: CaptureInputSchema.optional(),
 });
 
 export const StatusInputSchema = z.object({
@@ -124,7 +130,10 @@ export class SporesService {
     });
 
     try {
-      const result = await this.helper.startSession(this.toHelperSessionInput(manifest, input.purpose));
+      const result = await this.helper.startSession(this.toHelperSessionInput(manifest, {
+        purpose: input.purpose,
+        capture: input.capture,
+      }));
       this.activeHelperRunId = manifest.runId;
       return this.syncManifestFromBundle(manifest.runId, result);
     } catch (error) {
@@ -277,28 +286,31 @@ export class SporesService {
       return existing;
     }
 
-    const artifactPath = path.join(manifest.paths.artifactsDir, "helper-capture.txt");
-    const [content, artifactStat] = await Promise.all([
-      readFile(artifactPath).catch(() => undefined),
-      stat(artifactPath).catch(() => undefined),
-    ]);
-    if (!content || !artifactStat?.isFile()) {
-      return [];
+    const nativeTimeRangeMs: [number, number] = [
+      0,
+      await recoverNativeCaptureDurationMs(manifest.paths.runDir),
+    ];
+    const nativeArtifact = await recoverArtifact({
+      path: path.join(manifest.paths.artifactsDir, "capture.mov"),
+      artifactIdPrefix: "art_native",
+      kind: "video",
+      mediaType: "video/quicktime",
+      redactionState: "raw",
+      timeRangeMs: nativeTimeRangeMs,
+    });
+    if (nativeArtifact) {
+      return [nativeArtifact];
     }
 
-    return [
-      ArtifactRefSchema.parse({
-        artifactId: `art_recovered_${createHash("sha256").update(artifactPath).digest("hex").slice(0, 24)}`,
-        kind: "text",
-        path: artifactPath,
-        mediaType: "text/plain",
-        sha256: createHash("sha256").update(content).digest("hex"),
-        bytes: content.byteLength,
-        createdAt: new Date(artifactStat.mtimeMs).toISOString(),
-        timeRangeMs: [0, 1000],
-        redactionState: "not_required",
-      }),
-    ];
+    const syntheticArtifact = await recoverArtifact({
+      path: path.join(manifest.paths.artifactsDir, "helper-capture.txt"),
+      artifactIdPrefix: "art_recovered",
+      kind: "text",
+      mediaType: "text/plain",
+      redactionState: "not_required",
+      timeRangeMs: [0, 1000],
+    });
+    return syntheticArtifact ? [syntheticArtifact] : [];
   }
 
   private async ensureRequiredPermissions(): Promise<PermissionBrokerStatus> {
@@ -383,13 +395,20 @@ export class SporesService {
     });
   }
 
-  private toHelperSessionInput(manifest: RunManifest, purpose?: string): RecorderHelperSessionInput {
+  private toHelperSessionInput(
+    manifest: RunManifest,
+    options: {
+      purpose?: string;
+      capture?: z.infer<typeof CaptureInputSchema>;
+    } = {},
+  ): RecorderHelperSessionInput {
     return {
       runId: manifest.runId,
       sessionId: manifest.sessionId,
       target: manifest.target,
       paths: manifest.paths,
-      purpose,
+      purpose: options.purpose,
+      capture: options.capture,
       eventCount: manifest.eventCount,
       frameCount: manifest.frameCount,
     };
@@ -402,6 +421,52 @@ export function createSporesService(options: SporesServiceOptions = {}) {
 
 function parseRecorderBackend(value: string | undefined): RecorderBackend {
   return value === "fake" ? "fake" : "helper";
+}
+
+async function recoverArtifact(input: {
+  path: string;
+  artifactIdPrefix: string;
+  kind: ArtifactRef["kind"];
+  mediaType: string;
+  redactionState: ArtifactRef["redactionState"];
+  timeRangeMs: [number, number];
+}): Promise<ArtifactRef | undefined> {
+  const artifactPath = input.path;
+  const [content, artifactStat] = await Promise.all([
+    readFile(artifactPath).catch(() => undefined),
+    stat(artifactPath).catch(() => undefined),
+  ]);
+  if (!content || !artifactStat?.isFile()) {
+    return undefined;
+  }
+
+  return ArtifactRefSchema.parse({
+    artifactId: `${input.artifactIdPrefix}_${createHash("sha256").update(artifactPath).digest("hex").slice(0, 24)}`,
+    kind: input.kind,
+    path: artifactPath,
+    mediaType: input.mediaType,
+    sha256: createHash("sha256").update(content).digest("hex"),
+    bytes: content.byteLength,
+    createdAt: new Date(artifactStat.mtimeMs).toISOString(),
+    timeRangeMs: input.timeRangeMs,
+    redactionState: input.redactionState,
+  });
+}
+
+async function recoverNativeCaptureDurationMs(runDir: string): Promise<number> {
+  const raw = await readFile(path.join(runDir, "native-capture.json"), "utf8").catch(() => undefined);
+  if (!raw) {
+    return 1000;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as { maxDurationSeconds?: unknown };
+    return typeof parsed.maxDurationSeconds === "number" && Number.isFinite(parsed.maxDurationSeconds)
+      ? Math.max(1, parsed.maxDurationSeconds) * 1000
+      : 1000;
+  } catch {
+    return 1000;
+  }
 }
 
 function stripTargetMode(target: z.infer<typeof TargetInputSchema> | undefined): Partial<TargetRef> {

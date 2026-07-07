@@ -1,4 +1,6 @@
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -19,6 +21,7 @@ import {
 type ClientToolResult = Awaited<ReturnType<Client["callTool"]>>;
 
 let tempDir: string;
+const itIfNativeScreenCapture = process.platform === "darwin" && existsSync("/usr/sbin/screencapture") ? it : it.skip;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(path.join(os.tmpdir(), "spores-mcp-e2e-"));
@@ -243,6 +246,89 @@ describe("sporesd MCP stdio e2e", () => {
       const error = SporesErrorSchema.parse(expectError(missingTimeline));
       expect(error).toMatchObject({ error: "internal_error", retriable: false, requiresUserAction: false });
       expect(error.message).toContain("manifest.json");
+    } catch (error) {
+      if (stderr.length > 0) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}\n\nsporesd stderr:\n${stderr}`);
+      }
+      throw error;
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  }, 20_000);
+
+  itIfNativeScreenCapture("records a native screen movie through MCP stdio", async () => {
+    const runId = "run_mcp_native_capture_e2e_001";
+    const runsRoot = path.join(tempDir, "runs");
+    const client = new Client({ name: "spores-native-capture-e2e-test", version: "0.1.0" });
+    const transport = new StdioClientTransport({
+      command: bunCommand(),
+      args: ["run", "--silent", "mcp"],
+      cwd: repoRoot(),
+      env: childEnv({ SPORES_RUNS_ROOT: runsRoot }),
+      stderr: "pipe",
+    });
+    let stderr = "";
+    transport.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    try {
+      await client.connect(transport);
+
+      const started = RunManifestSchema.parse(
+        expectOk(
+          await client.callTool({
+            name: "session_recording_start",
+            arguments: {
+              runId,
+              purpose: "mcp native capture e2e",
+              target: { targetId: "display:main" },
+              capture: { mode: "native", maxDurationSeconds: 1 },
+            },
+          }),
+        ),
+      );
+      expect(started).toMatchObject({
+        runId,
+        status: "recording",
+        target: { kind: "display", targetId: "display:main" },
+      });
+
+      const stopped = RunManifestSchema.parse(
+        expectOk(
+          await client.callTool({
+            name: "session_recording_stop",
+            arguments: { runId },
+          }),
+        ),
+      );
+      expect(stopped).toMatchObject({ runId, status: "complete", eventCount: 9, frameCount: 2 });
+      expect(stopped.artifacts).toHaveLength(1);
+
+      const artifact = ArtifactRefSchema.parse(stopped.artifacts[0]);
+      expect(artifact).toMatchObject({
+        kind: "video",
+        mediaType: "video/quicktime",
+        redactionState: "raw",
+      });
+      const bytes = await readFile(artifact.path);
+      expect(bytes.byteLength).toBeGreaterThan(1024);
+      expect(artifact.bytes).toBe(bytes.byteLength);
+      expect(artifact.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+
+      const timeline = TimelineSchema.parse(
+        expectOk(
+          await client.callTool({
+            name: "session_recording_get_timeline",
+            arguments: { runId },
+          }),
+        ),
+      );
+      expect(timeline.frames[1]!.artifactId).toBe(artifact.artifactId);
+      expect(timeline.events[1]!.payload).toMatchObject({
+        nativeCapture: true,
+        captureBackend: "screencapture",
+      });
     } catch (error) {
       if (stderr.length > 0) {
         throw new Error(`${error instanceof Error ? error.message : String(error)}\n\nsporesd stderr:\n${stderr}`);

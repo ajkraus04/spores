@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
@@ -62,6 +63,22 @@ const SessionParamsSchema = z.object({
   purpose: z.string().optional(),
   eventCount: z.number().int().nonnegative().default(0),
   frameCount: z.number().int().nonnegative().default(0),
+  capture: z
+    .object({
+      mode: z.enum(["synthetic", "native"]).default("synthetic"),
+      maxDurationSeconds: z.number().int().min(1).max(30).default(2),
+    })
+    .default({ mode: "synthetic", maxDurationSeconds: 2 }),
+});
+
+const NativeCaptureStateSchema = z.object({
+  mode: z.literal("native"),
+  pid: z.number().int().positive(),
+  outputPath: z.string(),
+  startedAt: z.string().datetime(),
+  expectedStopAt: z.string().datetime(),
+  maxDurationSeconds: z.number().int().positive(),
+  displayNumber: z.number().int().positive().optional(),
 });
 
 export function createHelperStatus(targetCount: number) {
@@ -200,12 +217,17 @@ async function handleParsedRequest(request: HelperRequest) {
 
 async function startSession(params: z.infer<typeof SessionParamsSchema>) {
   await mkdir(params.paths.artifactsDir, { recursive: true });
+  const nativeCapture = params.capture.mode === "native";
+  const nativeState = nativeCapture ? await startNativeCapture(params) : undefined;
   const events = [
     createEvent(params, params.eventCount, "permission.snapshot", helperPermissionSnapshot()),
     createEvent(params, params.eventCount + 1, "recording.started", {
-      purpose: params.purpose ?? "helper-backed synthetic recording",
+      purpose: params.purpose ?? (nativeCapture ? "helper-backed screen recording" : "helper-backed synthetic recording"),
       recorder: "recorder-helper",
-      nativeCapture: false,
+      nativeCapture,
+      captureBackend: nativeCapture ? "screencapture" : "synthetic",
+      maxDurationSeconds: params.capture.maxDurationSeconds,
+      artifactPath: nativeState?.outputPath,
     }),
     createEvent(params, params.eventCount + 2, "target.selected", { target: params.target }),
     createEvent(params, params.eventCount + 3, "app.focused", {
@@ -251,32 +273,45 @@ async function getSessionStatus(params: z.infer<typeof SessionParamsSchema>) {
   const events = await readNdjson(params.paths.events, SporesEventSchema.parse);
   const frames = await readNdjson(params.paths.frames, FrameRefSchema.parse);
   const stopped = events.some((event) => event.type === "recording.stopped");
+  const nativeState = await readNativeCaptureState(params);
+  const artifacts = stopped && nativeState ? await nativeCaptureArtifacts(nativeState) : [];
   return RecorderHelperSessionSchema.parse({
     runId: params.runId,
     sessionId: params.sessionId,
     status: stopped ? "complete" : "recording",
     eventCount: events.length,
     frameCount: frames.length,
-    artifacts: [],
+    artifacts,
   });
 }
 
 async function stopSession(params: z.infer<typeof SessionParamsSchema>) {
   await mkdir(params.paths.artifactsDir, { recursive: true });
-  const frame = createFrame(params, params.frameCount, 1000);
+  const nativeState = await readNativeCaptureState(params);
+  const artifacts = nativeState
+    ? await waitForNativeCaptureArtifacts(nativeState)
+    : [await writeCaptureArtifact(params)];
+  const primaryArtifact = artifacts[0];
+  const frame = createFrame(
+    params,
+    params.frameCount,
+    nativeState ? nativeState.maxDurationSeconds * 1000 : 1000,
+    primaryArtifact?.artifactId,
+  );
   const events = [
     createEvent(params, params.eventCount, "screen.frame", {
       frameId: frame.frameId,
       videoTimeMs: frame.videoTimeMs,
-      synthetic: true,
+      synthetic: nativeState === undefined,
+      artifactId: primaryArtifact?.artifactId,
     }),
     createEvent(params, params.eventCount + 1, "recording.stopped", {
       reason: "requested",
       recorder: "recorder-helper",
-      nativeCapture: false,
+      nativeCapture: nativeState !== undefined,
+      captureBackend: nativeState ? "screencapture" : "synthetic",
     }),
   ];
-  const artifact = await writeCaptureArtifact(params);
 
   await appendFrame(params.paths.frames, frame);
   await appendEvents(params.paths.events, events);
@@ -287,7 +322,7 @@ async function stopSession(params: z.infer<typeof SessionParamsSchema>) {
     status: "complete",
     eventCount: params.eventCount + events.length,
     frameCount: params.frameCount + 1,
-    artifacts: [artifact],
+    artifacts,
   });
 }
 
@@ -311,13 +346,19 @@ function createEvent(
   });
 }
 
-function createFrame(params: z.infer<typeof SessionParamsSchema>, sequence: number, videoTimeMs: number) {
+function createFrame(
+  params: z.infer<typeof SessionParamsSchema>,
+  sequence: number,
+  videoTimeMs: number,
+  artifactId?: string,
+) {
   return FrameRefSchema.parse({
     frameId: `${params.sessionId}:frame:${sequence}`,
     sessionId: params.sessionId,
     sequence,
     monotonicTimeNs: monotonicTimeNs(),
     videoTimeMs,
+    artifactId,
   });
 }
 
@@ -336,6 +377,103 @@ async function writeCaptureArtifact(params: z.infer<typeof SessionParamsSchema>)
     timeRangeMs: [0, 1000],
     redactionState: "not_required",
   });
+}
+
+async function startNativeCapture(params: z.infer<typeof SessionParamsSchema>) {
+  if (process.platform !== "darwin") {
+    throw new Error("native screen recording is currently only available on macOS");
+  }
+
+  const outputPath = path.join(params.paths.artifactsDir, "capture.mov");
+  const displayNumber = captureDisplayNumber(params.target);
+  const args = [
+    "-x",
+    "-v",
+    `-V${params.capture.maxDurationSeconds}`,
+    ...(displayNumber ? [`-D${displayNumber}`] : []),
+    outputPath,
+  ];
+  const child = spawn("screencapture", args, {
+    cwd: params.paths.runDir,
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+
+  const startedAt = new Date();
+  const state = NativeCaptureStateSchema.parse({
+    mode: "native",
+    pid: child.pid,
+    outputPath,
+    startedAt: startedAt.toISOString(),
+    expectedStopAt: new Date(startedAt.getTime() + params.capture.maxDurationSeconds * 1000).toISOString(),
+    maxDurationSeconds: params.capture.maxDurationSeconds,
+    displayNumber,
+  });
+  await writeFile(nativeCaptureStatePath(params), `${JSON.stringify(state, null, 2)}\n`);
+  return state;
+}
+
+async function readNativeCaptureState(params: z.infer<typeof SessionParamsSchema>) {
+  const raw = await readFile(nativeCaptureStatePath(params), "utf8").catch(() => undefined);
+  return raw ? NativeCaptureStateSchema.parse(JSON.parse(raw)) : undefined;
+}
+
+async function waitForNativeCaptureArtifacts(state: z.infer<typeof NativeCaptureStateSchema>) {
+  const deadlineMs = Date.now() + state.maxDurationSeconds * 1000 + 5_000;
+  let lastError: unknown;
+
+  while (Date.now() <= deadlineMs) {
+    try {
+      return await nativeCaptureArtifacts(state);
+    } catch (error) {
+      lastError = error;
+      await sleep(100);
+    }
+  }
+
+  throw new Error(`native screen recording did not finish: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
+async function nativeCaptureArtifacts(state: z.infer<typeof NativeCaptureStateSchema>) {
+  const bytes = await readFile(state.outputPath);
+  const artifactStat = await stat(state.outputPath);
+  if (!artifactStat.isFile() || bytes.byteLength === 0) {
+    throw new Error(`native screen recording artifact is empty: ${state.outputPath}`);
+  }
+
+  return [
+    ArtifactRefSchema.parse({
+      artifactId: `art_native_${createHash("sha256").update(state.outputPath).digest("hex").slice(0, 24)}`,
+      kind: "video",
+      path: state.outputPath,
+      mediaType: "video/quicktime",
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      bytes: bytes.byteLength,
+      createdAt: new Date(artifactStat.mtimeMs).toISOString(),
+      timeRangeMs: [0, state.maxDurationSeconds * 1000],
+      redactionState: "raw",
+    }),
+  ];
+}
+
+function nativeCaptureStatePath(params: z.infer<typeof SessionParamsSchema>) {
+  return path.join(params.paths.runDir, "native-capture.json");
+}
+
+function captureDisplayNumber(target: TargetRef): number | undefined {
+  if (target.kind !== "display" || !target.displayId) {
+    return undefined;
+  }
+  if (target.displayId === "main") {
+    return 1;
+  }
+  const parsed = Number.parseInt(target.displayId, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function appendEvents(filePath: string, events: SporesEvent[]) {

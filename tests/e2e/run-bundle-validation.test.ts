@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,7 @@ import {
 import { createSporesService } from "../../apps/sporesd/src/service.js";
 
 let tempDir: string;
+const itIfNativeScreenCapture = process.platform === "darwin" && existsSync("/usr/sbin/screencapture") ? it : it.skip;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(path.join(os.tmpdir(), "spores-bundle-e2e-"));
@@ -45,6 +47,91 @@ describe("run bundle e2e validation", () => {
     expect(manifest.target).toEqual(started.target);
     expect(manifest.target.kind).not.toBe("fake");
   });
+
+  itIfNativeScreenCapture("persists a real timed screen recording movie artifact", async () => {
+    const runId = "run_native_capture_e2e_001";
+    const service = createSporesService({ rootDir: path.join(tempDir, "runs") });
+
+    const started = await service.start({
+      runId,
+      purpose: "validate native timed screen recording",
+      target: { targetId: "display:main" },
+      capture: { mode: "native", maxDurationSeconds: 1 },
+    });
+    expect(started).toMatchObject({
+      runId,
+      status: "recording",
+      eventCount: 7,
+      frameCount: 1,
+      target: {
+        kind: "display",
+        targetId: "display:main",
+      },
+    });
+
+    const stopped = await service.stop({ runId });
+    const paths = service.store.pathsForRun(runId);
+    const manifest = RunManifestSchema.parse(JSON.parse(await readFile(paths.manifest, "utf8")));
+    const events = parseNdjson(await readFile(paths.events, "utf8"), SporesEventSchema.parse);
+    const frames = parseNdjson(await readFile(paths.frames, "utf8"), FrameRefSchema.parse);
+    const timeline = TimelineSchema.parse(await service.timeline({ runId }));
+
+    expect(stopped).toMatchObject({
+      runId,
+      status: "complete",
+      eventCount: 9,
+      frameCount: 2,
+    });
+    expect(manifest).toEqual(stopped);
+    expect(events.map((event) => event.type)).toEqual([
+      "permission.snapshot",
+      "recording.started",
+      "target.selected",
+      "app.focused",
+      "window.changed",
+      "accessibility.tree",
+      "screen.frame",
+      "screen.frame",
+      "recording.stopped",
+    ]);
+    expect(events.map((event) => event.sequence)).toEqual([...Array(events.length).keys()]);
+    expect(events[1]!.payload).toMatchObject({
+      nativeCapture: true,
+      captureBackend: "screencapture",
+      maxDurationSeconds: 1,
+    });
+    expect(events[8]!.payload).toMatchObject({
+      nativeCapture: true,
+      captureBackend: "screencapture",
+    });
+    expect(frames.map((frame) => frame.sequence)).toEqual([0, 1]);
+    expect(frames[1]!.videoTimeMs).toBe(1000);
+
+    const artifact = manifest.artifacts[0];
+    expect(artifact).toMatchObject({
+      kind: "video",
+      mediaType: "video/quicktime",
+      redactionState: "raw",
+      timeRangeMs: [0, 1000],
+    });
+    expect(frames[1]!.artifactId).toBe(artifact!.artifactId);
+    expect(timeline.artifacts).toEqual(manifest.artifacts);
+
+    const artifactBytes = await readFile(artifact!.path);
+    const artifactStat = await stat(artifact!.path);
+    expect(path.basename(artifact!.path)).toBe("capture.mov");
+    expect(artifactStat.isFile()).toBe(true);
+    expect(artifactBytes.byteLength).toBeGreaterThan(1024);
+    expect(artifact!.bytes).toBe(artifactBytes.byteLength);
+    expect(artifact!.sha256).toBe(createHash("sha256").update(artifactBytes).digest("hex"));
+
+    const nativeState = JSON.parse(await readFile(path.join(paths.runDir, "native-capture.json"), "utf8"));
+    expect(nativeState).toMatchObject({
+      mode: "native",
+      outputPath: artifact!.path,
+      maxDurationSeconds: 1,
+    });
+  }, 20_000);
 
   it("persists a complete schema-valid bundle with contiguous streams and verifiable artifact bytes", async () => {
     const runId = "run_bundle_e2e_001";
