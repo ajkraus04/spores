@@ -519,14 +519,27 @@ export async function runStdio(): Promise<number> {
 async function handleRequest(line: string) {
   let requestId = "unknown";
   try {
-    const rawRequest = JSON.parse(line) as unknown;
-    requestId = extractRequestId(rawRequest);
-    const request = HelperRequestSchema.parse(rawRequest);
-    return {
-      id: request.id,
-      ok: true as const,
-      result: await handleParsedRequest(request),
-    };
+    const raw = JSON.parse(line) as unknown;
+    requestId = extractRequestId(raw);
+    const request = HelperRequestSchema.parse(raw);
+    try {
+      return {
+        id: request.id,
+        ok: true as const,
+        result: await handleParsedRequest(request),
+      };
+    } catch (error) {
+      return {
+        id: request.id,
+        ok: false as const,
+        error: {
+          code: error instanceof z.ZodError ? "invalid_request" : "handler_error",
+          message: error instanceof Error ? error.message : String(error),
+          retriable: !(error instanceof z.ZodError),
+          requiresUserAction: false,
+        },
+      };
+    }
   } catch (error) {
     return {
       id: requestId,
@@ -552,15 +565,18 @@ function extractRequestId(value: unknown): string {
 }
 
 async function handleParsedRequest(request: HelperRequest) {
-  const targets = await listTargets();
   switch (request.method) {
-    case "doctor":
+    case "doctor": {
+      const targets = await listTargets();
       return createHelperStatus(targets.length);
-    case "list_targets":
+    }
+    case "list_targets": {
+      const targets = await listTargets();
       return RecorderHelperTargetsSchema.parse({
         status: createHelperStatus(targets.length),
         targets,
       });
+    }
     case "permissions_status":
       return createPermissionStatus();
     case "permissions_request":

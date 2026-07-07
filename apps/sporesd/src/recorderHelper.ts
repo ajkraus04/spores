@@ -43,6 +43,16 @@ export type RecorderHelperSessionInput = {
   frameCount: number;
 };
 
+type HelperMethod =
+  | "doctor"
+  | "list_targets"
+  | "permissions_status"
+  | "permissions_request"
+  | "start_session"
+  | "get_status"
+  | "stop_session"
+  | "shutdown";
+
 const HelperResponseSchema = z.discriminatedUnion("ok", [
   z.object({
     id: z.string(),
@@ -63,6 +73,7 @@ const HelperResponseSchema = z.discriminatedUnion("ok", [
 
 export class RecorderHelperClient {
   readonly config: RecorderHelperConfig;
+  private readonly sessionHelpers = new Map<string, RecorderHelperProcess>();
 
   constructor(config: Partial<RecorderHelperConfig> = {}, env: NodeJS.ProcessEnv = process.env) {
     this.config = {
@@ -126,15 +137,36 @@ export class RecorderHelperClient {
   }
 
   async startSession(input: RecorderHelperSessionInput): Promise<RecorderHelperSession> {
-    return RecorderHelperSessionSchema.parse(await this.request("start_session", input));
+    const helper = this.createProcess();
+    this.sessionHelpers.set(input.runId, helper);
+    try {
+      return RecorderHelperSessionSchema.parse(await helper.request("start_session", input));
+    } catch (error) {
+      this.sessionHelpers.delete(input.runId);
+      await helper.close();
+      throw error;
+    }
   }
 
   async getSessionStatus(input: RecorderHelperSessionInput): Promise<RecorderHelperSession> {
-    return RecorderHelperSessionSchema.parse(await this.request("get_status", input));
+    const helper = this.sessionHelpers.get(input.runId);
+    return RecorderHelperSessionSchema.parse(
+      await (helper ? helper.request("get_status", input) : this.request("get_status", input)),
+    );
   }
 
   async stopSession(input: RecorderHelperSessionInput): Promise<RecorderHelperSession> {
-    return RecorderHelperSessionSchema.parse(await this.request("stop_session", input));
+    const helper = this.sessionHelpers.get(input.runId);
+    if (!helper) {
+      return RecorderHelperSessionSchema.parse(await this.request("stop_session", input));
+    }
+
+    try {
+      return RecorderHelperSessionSchema.parse(await helper.request("stop_session", input));
+    } finally {
+      this.sessionHelpers.delete(input.runId);
+      await helper.close();
+    }
   }
 
   private normalizeStatus(status: RecorderHelperStatus): RecorderHelperStatus {
@@ -228,17 +260,11 @@ export class RecorderHelperClient {
     });
   }
 
-  private async request(
-    method:
-      | "doctor"
-      | "list_targets"
-      | "permissions_status"
-      | "permissions_request"
-      | "start_session"
-      | "get_status"
-      | "stop_session",
-    params?: unknown,
-  ): Promise<unknown> {
+  private createProcess(): RecorderHelperProcess {
+    return new RecorderHelperProcess(this.config);
+  }
+
+  private async request(method: Exclude<HelperMethod, "shutdown">, params?: unknown): Promise<unknown> {
     const id = `helper_${randomUUID().replaceAll("-", "")}`;
     const child = spawn(this.config.command, this.config.args, {
       cwd: this.config.cwd,
@@ -291,13 +317,157 @@ export class RecorderHelperClient {
 
     const response = HelperResponseSchema.parse(JSON.parse(firstLine));
     if (response.id !== id) {
-      throw new Error(`recorder helper response id mismatch: expected ${id}, got ${response.id}`);
+      throw new Error(`recorder helper response id mismatch: expected ${id}, got ${response.id}${stderr ? `; stderr: ${stderr.trim()}` : ""}`);
     }
     if (!response.ok) {
-      throw new Error(response.error.message);
+      throw helperResponseError(response.error);
     }
     return response.result;
   }
+}
+
+class RecorderHelperProcess {
+  private readonly child;
+  private stdout = "";
+  private stderr = "";
+  private closed = false;
+  private closeCode: number | null | undefined;
+  private readonly pending = new Map<string, {
+    resolve(value: unknown): void;
+    reject(error: Error): void;
+    timeout: NodeJS.Timeout;
+  }>();
+
+  constructor(private readonly config: RecorderHelperConfig) {
+    this.child = spawn(config.command, config.args, {
+      cwd: config.cwd,
+      env: {
+        ...process.env,
+        ...config.env,
+        FORCE_COLOR: "0",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    this.child.stdout.setEncoding("utf8");
+    this.child.stderr.setEncoding("utf8");
+    this.child.stdout.on("data", (chunk) => {
+      this.stdout += chunk;
+      this.drainResponses();
+    });
+    this.child.stderr.on("data", (chunk) => {
+      this.stderr += chunk;
+    });
+    this.child.on("error", (error) => {
+      this.rejectPending(error);
+    });
+    this.child.on("close", (code) => {
+      this.closed = true;
+      this.closeCode = code;
+      if (this.pending.size > 0) {
+        this.rejectPending(new Error(`recorder helper exited with code ${code ?? "unknown"}${this.stderr ? `: ${this.stderr.trim()}` : ""}`));
+      }
+    });
+  }
+
+  request(method: HelperMethod, params?: unknown): Promise<unknown> {
+    if (this.closed) {
+      return Promise.reject(new Error(`recorder helper is already closed with code ${this.closeCode ?? "unknown"}`));
+    }
+
+    const id = `helper_${randomUUID().replaceAll("-", "")}`;
+    const payload = `${JSON.stringify({ id, method, params })}\n`;
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`recorder helper timed out after ${this.config.timeoutMs}ms waiting for ${method}`));
+      }, this.config.timeoutMs);
+      this.pending.set(id, { resolve, reject, timeout });
+      this.child.stdin.write(payload, (error) => {
+        if (!error) {
+          return;
+        }
+        const pending = this.pending.get(id);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          this.pending.delete(id);
+          pending.reject(error);
+        }
+      });
+    });
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    await this.request("shutdown").catch(() => undefined);
+    this.child.stdin.end();
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        this.child.kill();
+        resolve();
+      }, 1_000);
+      this.child.once("close", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+  }
+
+  private drainResponses(): void {
+    let newlineIndex = this.stdout.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = this.stdout.slice(0, newlineIndex).trim();
+      this.stdout = this.stdout.slice(newlineIndex + 1);
+      if (line.length > 0) {
+        this.handleResponseLine(line);
+      }
+      newlineIndex = this.stdout.indexOf("\n");
+    }
+  }
+
+  private handleResponseLine(line: string): void {
+    let response: z.infer<typeof HelperResponseSchema>;
+    try {
+      response = HelperResponseSchema.parse(JSON.parse(line));
+    } catch (error) {
+      this.rejectPending(new Error(`recorder helper returned malformed response: ${line}; ${error instanceof Error ? error.message : String(error)}`));
+      return;
+    }
+
+    const pending = this.pending.get(response.id);
+    if (!pending) {
+      this.rejectPending(new Error(`recorder helper response id mismatch: no pending request for ${response.id}`));
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pending.delete(response.id);
+    if (!response.ok) {
+      pending.reject(helperResponseError(response.error));
+      return;
+    }
+    pending.resolve(response.result);
+  }
+
+  private rejectPending(error: Error): void {
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+      this.pending.delete(id);
+    }
+  }
+}
+
+function helperResponseError(error: {
+  code: string;
+  message: string;
+  retriable: boolean;
+  requiresUserAction: boolean;
+}): Error {
+  return new Error(`recorder helper ${error.code}: ${error.message}`);
 }
 
 export function createRecorderHelperClient(env: NodeJS.ProcessEnv = process.env) {

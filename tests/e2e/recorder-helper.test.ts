@@ -109,15 +109,15 @@ describe("recorder helper process e2e", () => {
     expect(request.actions.map((action) => action.permission)).toEqual(["screenRecording"]);
   });
 
-  it("preserves the request id on stdio handler errors", async () => {
+  it("preserves request ids when helper request params are invalid", async () => {
     const response = await sendRawStdioRequest({
-      id: "req_invalid_stop",
-      method: "stop_session",
-      params: {},
+      id: "req_bad_start",
+      method: "start_session",
+      params: { runId: "run_missing_required_fields" },
     });
 
     expect(response).toMatchObject({
-      id: "req_invalid_stop",
+      id: "req_bad_start",
       ok: false,
       error: {
         code: "invalid_request",
@@ -126,9 +126,26 @@ describe("recorder helper process e2e", () => {
       },
     });
     if (response.ok) {
-      throw new Error("expected invalid stop_session request to fail");
+      throw new Error("expected invalid start_session request to fail");
     }
-    expect(response.error.message).toContain("runId");
+    expect(response.error.message).toContain("sessionId");
+  });
+
+  it("preserves parseable request ids for invalid helper methods", async () => {
+    const response = await sendRawStdioRequest({
+      id: "req_bad_method",
+      method: "missing_method",
+    });
+
+    expect(response).toMatchObject({
+      id: "req_bad_method",
+      ok: false,
+      error: {
+        code: "invalid_request",
+        retriable: false,
+        requiresUserAction: false,
+      },
+    });
   });
 
   it("writes lifecycle events, frames, and artifacts over stdio", async () => {
