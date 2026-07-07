@@ -5,7 +5,13 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { RecorderHelperTargetsSchema, RunManifestSchema, SporesErrorSchema } from "@spores/schema";
+import {
+  PermissionBrokerStatusSchema,
+  PermissionRequestResultSchema,
+  RecorderHelperTargetsSchema,
+  RunManifestSchema,
+  SporesErrorSchema,
+} from "@spores/schema";
 import { createSporesService } from "../../apps/sporesd/src/service.js";
 
 const execFileAsync = promisify(execFile);
@@ -63,6 +69,40 @@ describe("spores CLI e2e", () => {
       "window:spores-recorder-helper:status",
     ]);
     expect(RecorderHelperTargetsSchema.parse(JSON.parse(await runPackageScript("targets", ["--json"], runsRoot))).targets).toHaveLength(3);
+  });
+
+  it("prints permission status and request guidance as JSON from an external CLI process", async () => {
+    const runsRoot = path.join(tempDir, "runs");
+    const env = {
+      SPORES_RUNS_ROOT: runsRoot,
+      SPORES_PERMISSION_ACCESSIBILITY: "missing",
+    };
+
+    const status = PermissionBrokerStatusSchema.parse(
+      JSON.parse(await runSporesCli(["permissions", "status", "--json"], runsRoot, env)),
+    );
+    expect(status).toMatchObject({
+      mode: "deterministic",
+      requiresUserAction: true,
+      snapshot: {
+        screenRecording: "granted",
+        accessibility: "missing",
+        requiresUserAction: true,
+      },
+    });
+    expect(status.capabilities.find((capability) => capability.permission === "accessibility")).toMatchObject({
+      required: true,
+      status: "missing",
+    });
+
+    const request = PermissionRequestResultSchema.parse(
+      JSON.parse(await runSporesCli(["permissions", "request", "--json"], runsRoot, env)),
+    );
+    expect(request).toMatchObject({
+      opened: false,
+      status: { requiresUserAction: true },
+    });
+    expect(request.actions.map((action) => action.permission)).toEqual(["accessibility"]);
   });
 
   it("returns the latest persisted run status across CLI processes", async () => {

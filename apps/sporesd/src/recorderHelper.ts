@@ -3,6 +3,10 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import {
+  PermissionBrokerStatus,
+  PermissionBrokerStatusSchema,
+  PermissionRequestResult,
+  PermissionRequestResultSchema,
   RecorderHelperStatus,
   RecorderHelperSession,
   RecorderHelperSessionSchema,
@@ -95,6 +99,14 @@ export class RecorderHelperClient {
     }
   }
 
+  async permissionsStatus(): Promise<PermissionBrokerStatus> {
+    return PermissionBrokerStatusSchema.parse(await this.request("permissions_status"));
+  }
+
+  async requestPermissions(): Promise<PermissionRequestResult> {
+    return PermissionRequestResultSchema.parse(await this.request("permissions_request"));
+  }
+
   async startSession(input: RecorderHelperSessionInput): Promise<RecorderHelperSession> {
     return RecorderHelperSessionSchema.parse(await this.request("start_session", input));
   }
@@ -132,7 +144,14 @@ export class RecorderHelperClient {
   }
 
   private async request(
-    method: "doctor" | "list_targets" | "start_session" | "get_status" | "stop_session",
+    method:
+      | "doctor"
+      | "list_targets"
+      | "permissions_status"
+      | "permissions_request"
+      | "start_session"
+      | "get_status"
+      | "stop_session",
     params?: unknown,
   ): Promise<unknown> {
     const id = `helper_${randomUUID().replaceAll("-", "")}`;

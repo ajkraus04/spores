@@ -2,7 +2,7 @@
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
-import { createSporesService } from "./service.js";
+import { createSporesService, SporesServiceError } from "./service.js";
 
 type CliIo = {
   stdout: Writable;
@@ -11,6 +11,7 @@ type CliIo = {
 
 type ParsedArgs = {
   command: string;
+  subcommand?: string;
   json: boolean;
   runId?: string;
 };
@@ -23,6 +24,8 @@ Usage:
   spores doctor [--json]
   spores status [--json] [--run-id <run-id>]
   spores targets [--json]
+  spores permissions status [--json]
+  spores permissions request [--json]
   spores mcp
   spores help
 
@@ -60,6 +63,17 @@ export async function runCli(
       case "targets":
         writeValue(io.stdout, parsed.json, await service.listTargets(), formatTargets);
         return 0;
+      case "permissions":
+        switch (parsed.subcommand ?? "status") {
+          case "status":
+            writeValue(io.stdout, parsed.json, await service.permissionsStatus(), formatPermissionsStatus);
+            return 0;
+          case "request":
+            writeValue(io.stdout, parsed.json, await service.requestPermissions(), formatPermissionsRequest);
+            return 0;
+          default:
+            throw new Error(`unknown permissions command: ${parsed.subcommand}`);
+        }
       case "mcp":
         await import("./index.js");
         return 0;
@@ -68,12 +82,7 @@ export async function runCli(
     }
   } catch (error) {
     const json = argv.includes("--json");
-    const value = {
-      error: "cli_error",
-      message: error instanceof Error ? error.message : String(error),
-      retriable: false,
-      requiresUserAction: false,
-    };
+    const value = formatError(error);
     write(json ? io.stdout : io.stderr, json ? `${JSON.stringify(value, null, 2)}\n` : `${value.message}\n`);
     return 1;
   }
@@ -85,15 +94,20 @@ function parseArgs(argv: string[]): ParsedArgs {
     command,
     json: false,
   };
+  const args = [...rest];
 
-  for (let index = 0; index < rest.length; index += 1) {
-    const arg = rest[index];
+  if (command === "permissions" && args[0] && !args[0].startsWith("-")) {
+    parsed.subcommand = args.shift();
+  }
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
     if (arg === "--json") {
       parsed.json = true;
       continue;
     }
     if (arg === "--run-id") {
-      const value = rest[index + 1];
+      const value = args[index + 1];
       if (!value) {
         throw new Error("--run-id requires a value");
       }
@@ -161,6 +175,48 @@ function formatTargets(value: Awaited<ReturnType<ReturnType<typeof createSporesS
   }
   lines.push("");
   return lines.join("\n");
+}
+
+function formatPermissionsStatus(value: Awaited<ReturnType<ReturnType<typeof createSporesService>["permissionsStatus"]>>): string {
+  const lines = [
+    "Spores permissions",
+    `platform: ${value.platform}`,
+    `requires_user_action: ${value.requiresUserAction}`,
+    ...value.capabilities.map((capability) => (
+      `${capability.permission}: ${capability.status}${capability.required ? " (required)" : ""}`
+    )),
+    "",
+  ];
+  return lines.join("\n");
+}
+
+function formatPermissionsRequest(value: Awaited<ReturnType<ReturnType<typeof createSporesService>["requestPermissions"]>>): string {
+  const lines = [
+    "Spores permission request",
+    `opened: ${value.opened}`,
+    value.message,
+    ...value.actions.map((action) => `${action.permission}: ${action.settingsUrl ?? "manual action required"}`),
+    "",
+  ];
+  return lines.join("\n");
+}
+
+function formatError(error: unknown) {
+  if (error instanceof SporesServiceError) {
+    return {
+      error: error.code,
+      message: error.message,
+      retriable: error.retriable,
+      requiresUserAction: error.requiresUserAction,
+      details: error.details,
+    };
+  }
+  return {
+    error: "cli_error",
+    message: error instanceof Error ? error.message : String(error),
+    retriable: false,
+    requiresUserAction: false,
+  };
 }
 
 function write(stream: Writable, value: string): void {

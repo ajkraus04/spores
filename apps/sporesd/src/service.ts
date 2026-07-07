@@ -7,7 +7,7 @@ import { FakeRecorder } from "@spores/fake-recorder";
 import {
   ArtifactRef,
   ArtifactRefSchema,
-  PermissionSnapshot,
+  PermissionBrokerStatus,
   RecorderHelperSession,
   RunManifest,
   SporesEventSchema,
@@ -52,6 +52,10 @@ export const ArtifactInputSchema = z.object({
 
 export const HelperTargetsInputSchema = z.object({});
 
+export const PermissionsStatusInputSchema = z.object({});
+
+export const PermissionsRequestInputSchema = z.object({});
+
 export type RecorderBackend = "helper" | "fake";
 
 export type SporesServiceOptions = {
@@ -59,6 +63,28 @@ export type SporesServiceOptions = {
   helper?: RecorderHelperClient;
   backend?: RecorderBackend;
 };
+
+export class SporesServiceError extends Error {
+  readonly code: string;
+  readonly retriable: boolean;
+  readonly requiresUserAction: boolean;
+  readonly details: Record<string, unknown> | undefined;
+
+  constructor(input: {
+    code: string;
+    message: string;
+    retriable: boolean;
+    requiresUserAction: boolean;
+    details?: Record<string, unknown>;
+  }) {
+    super(input.message);
+    this.name = "SporesServiceError";
+    this.code = input.code;
+    this.retriable = input.retriable;
+    this.requiresUserAction = input.requiresUserAction;
+    this.details = input.details;
+  }
+}
 
 export class SporesService {
   readonly store: RunStore;
@@ -89,11 +115,12 @@ export class SporesService {
       return this.recorder.start(input);
     }
 
+    const permissions = await this.ensureRequiredPermissions();
     const target = await this.resolveHelperTarget(input.target);
     const manifest = await this.store.createRun({
       runId: input.runId,
       target,
-      permissionSnapshot: helperPermissionSnapshot(),
+      permissionSnapshot: permissions.snapshot,
     });
 
     try {
@@ -173,6 +200,14 @@ export class SporesService {
 
   listTargets(_input: z.infer<typeof HelperTargetsInputSchema> = {}) {
     return this.helper.listTargets();
+  }
+
+  permissionsStatus(_input: z.infer<typeof PermissionsStatusInputSchema> = {}) {
+    return this.helper.permissionsStatus();
+  }
+
+  requestPermissions(_input: z.infer<typeof PermissionsRequestInputSchema> = {}) {
+    return this.helper.requestPermissions();
   }
 
   private async readRecoverableManifest(runId: string): Promise<RunManifest> {
@@ -266,6 +301,31 @@ export class SporesService {
     ];
   }
 
+  private async ensureRequiredPermissions(): Promise<PermissionBrokerStatus> {
+    const status = await this.permissionsStatus();
+    if (!status.requiresUserAction) {
+      return status;
+    }
+
+    const missing = status.capabilities.filter((capability) => (
+      capability.required && capability.status !== "granted"
+    ));
+    throw new SporesServiceError({
+      code: "missing_permission",
+      message: `Required recording permissions are not granted: ${missing.map((capability) => capability.label).join(", ")}`,
+      retriable: true,
+      requiresUserAction: true,
+      details: {
+        permissions: missing.map((capability) => ({
+          permission: capability.permission,
+          label: capability.label,
+          status: capability.status,
+          settingsUrl: capability.settingsUrl,
+        })),
+      },
+    });
+  }
+
   private async markRunFailed(runId: string, error: unknown): Promise<RunManifest> {
     return this.store.updateManifest(runId, (current) => ({
       ...current,
@@ -356,16 +416,4 @@ function mergeArtifacts(existing: ArtifactRef[], incoming: ArtifactRef[]): Artif
       return true;
     }),
   ];
-}
-
-function helperPermissionSnapshot(): PermissionSnapshot {
-  return {
-    platform: process.platform,
-    screenRecording: "granted",
-    accessibility: "granted",
-    inputMonitoring: "not_requested",
-    microphone: "not_requested",
-    systemAudio: "not_requested",
-    requiresUserAction: false,
-  };
 }
