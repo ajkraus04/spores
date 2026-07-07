@@ -36,7 +36,9 @@ Agents should use Spores through MCP over stdio:
 bun run --silent mcp
 ```
 
-Example MCP server config:
+The checked-in `.mcp.json` uses that command directly. If your MCP client does
+not read repo-local MCP config, add this server entry to the client's MCP
+configuration:
 
 ```json
 {
@@ -50,11 +52,56 @@ Example MCP server config:
 }
 ```
 
+The `mcp`, `spores`, `recorder-helper`, and `smoke` package scripts launch TSX
+through Node. This keeps `bun run --silent mcp` as the package-manager entrypoint
+while avoiding Bun/TSX resolver failures in embedded agent runtimes. If a client
+cannot execute package scripts, use the equivalent direct command:
+
+```bash
+node node_modules/tsx/dist/cli.mjs apps/sporesd/src/index.ts
+```
+
 Use `SPORES_RUNS_ROOT` to choose where run bundles are written:
 
 ```bash
 SPORES_RUNS_ROOT=/tmp/spores-runs bun run --silent mcp
 ```
+
+Verify the server from the same shell or agent runtime that will launch it:
+
+```bash
+bun run --silent spores -- doctor --json
+bun run --silent spores -- permissions status --json
+bun run --silent spores -- targets --json
+```
+
+An MCP client should see these tools after reconnecting:
+
+```text
+spores_doctor
+recorder_ready
+recorder_helper_status
+recorder_helper_list_targets
+recorder_target_resolve
+recorder_permissions_status
+recorder_permissions_request
+session_recording_begin
+session_recording_record_target
+session_recording_record_window
+session_recording_record_app
+session_recording_record_region
+session_recording_record_active_window
+session_recording_start
+session_recording_status
+session_recording_stop
+session_recording_append_event
+session_recording_get_timeline
+session_recording_get_artifact
+```
+
+If a client only shows some of these tools, stop and restart that MCP server
+connection. Tool discovery is done when the client connects, so stale client
+sessions can keep an old partial tool list.
 
 ## Recommended Agent Flow
 
@@ -251,11 +298,60 @@ The MCP equivalents are:
 { "name": "recorder_permissions_request", "arguments": {} }
 ```
 
+On macOS, grant Screen Recording to the process that launches Spores. Depending
+on how the MCP client starts the server, System Settings may show the agent app,
+Terminal/iTerm, Node, Bun, or another bundled runtime. The permission flow is:
+
+1. Run `recorder_permissions_status` or `bun run --silent spores -- permissions status --json`.
+2. If `requiresUserAction` is true, run `recorder_permissions_request` for the
+   exact missing permissions and settings pane hints.
+3. Grant Screen Recording to the launching process in System Settings.
+4. Fully restart the launching app or terminal, then reconnect the MCP server.
+5. Run `recorder_ready` before recording.
+
+Accessibility is reported because it is needed for richer future app metadata,
+but current video capture requires Screen Recording. Optional permissions such
+as Input Monitoring, Microphone, and System Audio are reported as
+`not_requested` unless a future backend needs them.
+
 For tests, permission states can be simulated:
 
 ```bash
 SPORES_PERMISSION_SCREEN_RECORDING=missing bun run --silent spores -- permissions status --json
 ```
+
+## Troubleshooting Agent Recording
+
+Use this sequence when an agent cannot record:
+
+```json
+{ "name": "spores_doctor", "arguments": {} }
+```
+
+```json
+{ "name": "recorder_ready", "arguments": {} }
+```
+
+```json
+{ "name": "recorder_helper_list_targets", "arguments": {} }
+```
+
+`recorder_helper_list_targets` should return displays and windows with absolute
+screen coordinates. If target discovery works but recording fails, try a small
+known region first:
+
+```json
+{
+  "name": "session_recording_record_region",
+  "arguments": {
+    "bounds": { "x": 0, "y": 0, "width": 320, "height": 240 },
+    "seconds": 1
+  }
+}
+```
+
+Successful native recordings write `artifacts/capture.mp4` and return a video
+artifact with `mediaType: "video/mp4"`.
 
 ## CLI
 

@@ -109,6 +109,42 @@ describe("recorder helper process e2e", () => {
     expect(request.actions.map((action) => action.permission)).toEqual(["screenRecording"]);
   });
 
+  it("preserves request ids when a valid helper request handler fails", async () => {
+    const response = await sendRawStdioRequest({
+      id: "req_bad_start",
+      method: "start_session",
+      params: { runId: "run_missing_required_fields" },
+    });
+
+    expect(response).toMatchObject({
+      id: "req_bad_start",
+      ok: false,
+      error: {
+        code: "handler_error",
+        retriable: true,
+        requiresUserAction: false,
+      },
+    });
+    expect(response.error.message).toContain("sessionId");
+  });
+
+  it("preserves parseable request ids for invalid helper methods", async () => {
+    const response = await sendRawStdioRequest({
+      id: "req_bad_method",
+      method: "missing_method",
+    });
+
+    expect(response).toMatchObject({
+      id: "req_bad_method",
+      ok: false,
+      error: {
+        code: "invalid_request",
+        retriable: false,
+        requiresUserAction: false,
+      },
+    });
+  });
+
   it("writes lifecycle events, frames, and artifacts over stdio", async () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "spores-helper-lifecycle-"));
     try {
@@ -193,6 +229,15 @@ async function sendStdioRequest(
   request: { id: string; method: string; params?: unknown },
   env: Record<string, string> = {},
 ): Promise<unknown> {
+  const response = await sendRawStdioRequest(request, env);
+  expect(response).toMatchObject({ id: request.id, ok: true });
+  return response.result;
+}
+
+async function sendRawStdioRequest(
+  request: { id: string; method: string; params?: unknown },
+  env: Record<string, string> = {},
+): Promise<any> {
   const child = spawn(bunCommand(), ["run", "--silent", "recorder-helper", "--", "--stdio"], {
     cwd: repoRoot(),
     env: childEnv(env),
@@ -217,9 +262,7 @@ async function sendStdioRequest(
 
   const firstLine = stdout.split("\n").find((line) => line.trim().length > 0);
   expect(firstLine).toBeDefined();
-  const response = JSON.parse(firstLine!);
-  expect(response).toMatchObject({ id: request.id, ok: true });
-  return response.result;
+  return JSON.parse(firstLine!);
 }
 
 function repoRoot(): string {
