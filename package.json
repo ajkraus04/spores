@@ -20,6 +20,7 @@
     "targets": "bun run spores -- targets",
     "recorder-helper": "node node_modules/tsx/dist/cli.mjs apps/recorder-helper/src/index.ts",
     "smoke": "node node_modules/tsx/dist/cli.mjs apps/sporesd/src/smoke.ts",
+    "mcp:doctor": "node node_modules/tsx/dist/cli.mjs apps/sporesd/src/mcpDoctor.ts",
     "mcp": "node node_modules/tsx/dist/cli.mjs apps/sporesd/src/index.ts"
   },
   "dependencies": {

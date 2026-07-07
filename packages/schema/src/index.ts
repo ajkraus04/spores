@@ -132,6 +132,7 @@ export const PermissionBrokerStatusSchema = z.object({
       message: z.string(),
       retriable: z.boolean(),
       requiresUserAction: z.boolean(),
+      details: z.record(z.string(), z.unknown()).optional(),
     })
     .optional(),
 });
@@ -154,12 +155,15 @@ export const RecorderHelperStatusSchema = z.object({
   protocolVersion: z.literal(1).optional(),
   platform: z.string().optional(),
   targetCount: z.number().int().nonnegative().optional(),
+  targetSource: z.enum(["macos", "deterministic_fallback", "unknown"]).optional(),
+  targetDiscoveryError: z.string().optional(),
   capabilities: z
     .object({
       listTargets: z.boolean(),
       startSession: z.boolean(),
       stopSession: z.boolean(),
       permissions: z.boolean().optional(),
+      permissionsProbe: z.boolean().optional(),
     })
     .optional(),
   error: z
@@ -168,6 +172,7 @@ export const RecorderHelperStatusSchema = z.object({
       message: z.string(),
       retriable: z.boolean(),
       requiresUserAction: z.boolean(),
+      details: z.record(z.string(), z.unknown()).optional(),
     })
     .optional(),
 });

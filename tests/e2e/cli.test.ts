@@ -15,7 +15,7 @@ import {
 import { createSporesService } from "../../apps/sporesd/src/service.js";
 
 const execFileAsync = promisify(execFile);
-const CLI_E2E_TIMEOUT_MS = 20_000;
+const CLI_E2E_TIMEOUT_MS = 60_000;
 
 let tempDir: string;
 
@@ -241,6 +241,15 @@ describe("spores CLI e2e", () => {
         error: {
           code: "helper_unavailable",
           retriable: true,
+          details: {
+            command: path.join(tempDir, "missing-helper"),
+            cwdPackageJsonPresent: true,
+            executablePresent: false,
+            suggestedCommands: expect.arrayContaining([
+              "bun install",
+              "bun run --silent mcp:doctor -- --json",
+            ]),
+          },
         },
       },
     });

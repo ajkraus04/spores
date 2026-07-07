@@ -16,6 +16,7 @@ export function createSporesMcpServer(options: SporesServiceOptions = {}) {
       {
         description: tool.description,
         inputSchema: tool.inputSchema,
+        outputSchema: tool.outputSchema,
         annotations: tool.readOnly ? { readOnlyHint: true, openWorldHint: false } : { openWorldHint: false },
       },
       async (input: unknown) => {

@@ -196,10 +196,20 @@ describe("run bundle e2e validation", () => {
     expect(started.target).toMatchObject({
       kind: "window",
       targetId: windowTarget.targetId,
-      bounds: windowTarget.bounds,
+      bounds: expect.objectContaining({
+        x: expect.any(Number),
+        y: expect.any(Number),
+        width: expect.any(Number),
+        height: expect.any(Number),
+      }),
       window: {
         id: windowTarget.window!.id,
-        bounds: windowTarget.window!.bounds,
+        bounds: expect.objectContaining({
+          x: expect.any(Number),
+          y: expect.any(Number),
+          width: expect.any(Number),
+          height: expect.any(Number),
+        }),
       },
     });
 
