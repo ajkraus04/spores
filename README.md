@@ -70,6 +70,7 @@ SPORES_RUNS_ROOT=/tmp/spores-runs bun run --silent mcp
 Verify the server from the same shell or agent runtime that will launch it:
 
 ```bash
+bun run --silent mcp:doctor -- --json
 bun run --silent spores -- doctor --json
 bun run --silent spores -- permissions status --json
 bun run --silent spores -- targets --json
@@ -82,10 +83,15 @@ spores_doctor
 recorder_ready
 recorder_helper_status
 recorder_helper_list_targets
+recorder_context_snapshot
 recorder_target_resolve
+recorder_target_select
+recorder_target_validate
 recorder_permissions_status
+recorder_permissions_probe
 recorder_permissions_request
 session_recording_begin
+session_recording_capture
 session_recording_record_target
 session_recording_record_window
 session_recording_record_app
@@ -95,8 +101,12 @@ session_recording_start
 session_recording_status
 session_recording_stop
 session_recording_append_event
+session_recording_append_agent_step
 session_recording_get_timeline
+session_recording_query_timeline
+session_recording_result
 session_recording_get_artifact
+session_recording_read_artifact
 ```
 
 If a client only shows some of these tools, stop and restart that MCP server
@@ -105,7 +115,9 @@ sessions can keep an old partial tool list.
 
 ## Recommended Agent Flow
 
-Check local readiness first:
+Check local readiness first. `recorder_ready` runs the native permission probe
+and returns `recommendedTools`; only use recommended tools that are present in
+the MCP tool list.
 
 ```json
 {
@@ -114,21 +126,40 @@ Check local readiness first:
 }
 ```
 
-Resolve a target when the agent needs to inspect what will be captured:
+Take a context snapshot when the agent needs current display/window coordinates.
+Pass the returned `snapshotId` into target selection if the agent wants the
+selection bound to that inspected window set.
 
 ```json
 {
-  "name": "recorder_target_resolve",
+  "name": "recorder_context_snapshot",
+  "arguments": {}
+}
+```
+
+Select and validate a target before recording:
+
+```json
+{
+  "name": "recorder_target_select",
   "arguments": {
-    "kind": "window",
-    "bundleId": "com.google.Chrome",
-    "titleIncludes": "Calendar"
+    "snapshotId": "snap_id_from_context_snapshot",
+    "selector": {
+      "kind": "window",
+      "bundleId": "com.google.Chrome",
+      "titleIncludes": "Calendar"
+    },
+    "targetPolicy": {
+      "minConfidence": "medium",
+      "failOnAmbiguous": true,
+      "maxAlternatives": 5
+    }
   }
 }
 ```
 
-For most tasks, use a one-shot recording tool. It resolves the target, records,
-stops, and returns the artifact and timeline summary in one response.
+For most tasks, use `session_recording_capture`. It selects a target, records,
+stops, verifies artifacts, and returns a bounded result summary in one response.
 
 ## Common Recording Calls
 
@@ -136,9 +167,12 @@ Record the frontmost matching Chrome window:
 
 ```json
 {
-  "name": "session_recording_record_window",
+  "name": "session_recording_capture",
   "arguments": {
-    "bundleId": "com.google.Chrome",
+    "target": {
+      "kind": "window",
+      "bundleId": "com.google.Chrome"
+    },
     "seconds": 5
   }
 }
@@ -148,10 +182,13 @@ Record a window by title:
 
 ```json
 {
-  "name": "session_recording_record_window",
+  "name": "session_recording_capture",
   "arguments": {
-    "app": "Chrome",
-    "titleIncludes": "FOX Sports",
+    "target": {
+      "kind": "window",
+      "app": "Chrome",
+      "titleIncludes": "FOX Sports"
+    },
     "seconds": 5
   }
 }
@@ -161,9 +198,12 @@ Record an app's visible bounds:
 
 ```json
 {
-  "name": "session_recording_record_app",
+  "name": "session_recording_capture",
   "arguments": {
-    "bundleId": "com.google.Chrome",
+    "target": {
+      "kind": "app",
+      "bundleId": "com.google.Chrome"
+    },
     "seconds": 10
   }
 }
@@ -173,15 +213,22 @@ Record explicit screen coordinates:
 
 ```json
 {
-  "name": "session_recording_record_region",
+  "name": "session_recording_capture",
   "arguments": {
-    "bounds": { "x": 0, "y": 0, "width": 1280, "height": 720 },
+    "target": {
+      "kind": "region",
+      "bounds": { "x": 0, "y": 0, "width": 1280, "height": 720 }
+    },
     "seconds": 5
   }
 }
 ```
 
-Record the frontmost helper-listed window:
+The older `session_recording_record_window`, `session_recording_record_app`,
+`session_recording_record_region`, and `session_recording_record_active_window`
+tools remain available for compatibility.
+
+Record the frontmost helper-listed window with the compatibility tool:
 
 ```json
 {
@@ -232,7 +279,7 @@ List capturable displays, apps, and windows:
 
 ```json
 {
-  "name": "recorder_helper_list_targets",
+  "name": "recorder_context_snapshot",
   "arguments": {}
 }
 ```
@@ -260,6 +307,22 @@ Targets include screen coordinates:
 macOS exposes windows, not browser tabs, as native capture targets. For browser
 tabs, select the Chrome window by title, URL-derived title text, or bundle ID.
 
+Validate a target if it came from an earlier snapshot:
+
+```json
+{
+  "name": "recorder_target_validate",
+  "arguments": {
+    "snapshotId": "snap_id_from_context_snapshot",
+    "targetId": "window:480794"
+  }
+}
+```
+
+Native capture is conservative. A target must be addressable as a display, a
+numeric native window, or explicit bounds. If a target is stale or lacks bounds,
+Spores returns a structured error instead of silently recording the wrong area.
+
 ## Output
 
 Each recording writes a run bundle under `SPORES_RUNS_ROOT` or the default local
@@ -273,6 +336,45 @@ run directory. A bundle contains:
 
 Video artifacts include file path, media type, bytes, SHA-256, time range, and
 redaction state. The final frame links to the video artifact ID.
+
+Read result summaries and artifacts through bounded tools:
+
+```json
+{
+  "name": "session_recording_result",
+  "arguments": {
+    "runId": "run_id",
+    "includeTimeline": "summary"
+  }
+}
+```
+
+```json
+{
+  "name": "session_recording_query_timeline",
+  "arguments": {
+    "runId": "run_id",
+    "query": "checkout",
+    "limit": 50,
+    "includePayloads": false
+  }
+}
+```
+
+```json
+{
+  "name": "session_recording_read_artifact",
+  "arguments": {
+    "runId": "run_id",
+    "artifactId": "artifact_id",
+    "contentMode": "metadata"
+  }
+}
+```
+
+`session_recording_get_artifact` is a legacy small-text reader. Use
+`session_recording_read_artifact` for video artifacts and for all agent-facing
+artifact reads.
 
 ## Permissions
 
@@ -295,6 +397,10 @@ The MCP equivalents are:
 ```
 
 ```json
+{ "name": "recorder_permissions_probe", "arguments": {} }
+```
+
+```json
 { "name": "recorder_permissions_request", "arguments": {} }
 ```
 
@@ -302,7 +408,7 @@ On macOS, grant Screen Recording to the process that launches Spores. Depending
 on how the MCP client starts the server, System Settings may show the agent app,
 Terminal/iTerm, Node, Bun, or another bundled runtime. The permission flow is:
 
-1. Run `recorder_permissions_status` or `bun run --silent spores -- permissions status --json`.
+1. Run `recorder_permissions_probe` or `bun run --silent mcp:doctor -- --json`.
 2. If `requiresUserAction` is true, run `recorder_permissions_request` for the
    exact missing permissions and settings pane hints.
 3. Grant Screen Recording to the launching process in System Settings.
@@ -324,6 +430,10 @@ SPORES_PERMISSION_SCREEN_RECORDING=missing bun run --silent spores -- permission
 
 Use this sequence when an agent cannot record:
 
+```bash
+bun run --silent mcp:doctor -- --json
+```
+
 ```json
 { "name": "spores_doctor", "arguments": {} }
 ```
@@ -333,10 +443,10 @@ Use this sequence when an agent cannot record:
 ```
 
 ```json
-{ "name": "recorder_helper_list_targets", "arguments": {} }
+{ "name": "recorder_context_snapshot", "arguments": {} }
 ```
 
-`recorder_helper_list_targets` should return displays and windows with absolute
+`recorder_context_snapshot` should return displays and windows with absolute
 screen coordinates. If target discovery works but recording fails, try a small
 known region first:
 
@@ -362,6 +472,7 @@ bun run --silent spores -- doctor --json
 bun run --silent spores -- status --json
 bun run --silent spores -- targets --json
 bun run --silent spores -- permissions status --json
+bun run --silent mcp:doctor -- --json
 ```
 
 Run the recorder helper directly:

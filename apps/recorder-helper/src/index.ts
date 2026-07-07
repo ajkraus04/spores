@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
@@ -181,6 +182,7 @@ const HelperRequestSchema = z.object({
     "doctor",
     "list_targets",
     "permissions_status",
+    "permissions_probe",
     "permissions_request",
     "start_session",
     "get_status",
@@ -250,7 +252,13 @@ const MacOSTargetSnapshotSchema = z.object({
   windows: z.array(MacOSWindowTargetSchema),
 });
 
-export function createHelperStatus(targetCount: number) {
+type TargetSnapshot = {
+  targets: TargetRef[];
+  targetSource: "macos" | "deterministic_fallback";
+  targetDiscoveryError?: string;
+};
+
+export function createHelperStatus(targetCount: number, snapshot?: Pick<TargetSnapshot, "targetSource" | "targetDiscoveryError">) {
   return {
     configured: true,
     available: true,
@@ -262,24 +270,46 @@ export function createHelperStatus(targetCount: number) {
     protocolVersion: PROTOCOL_VERSION,
     platform: process.platform,
     targetCount,
+    targetSource: snapshot?.targetSource ?? "unknown",
+    targetDiscoveryError: snapshot?.targetDiscoveryError,
     capabilities: {
       listTargets: true,
       startSession: true,
       stopSession: true,
       permissions: true,
+      permissionsProbe: true,
     },
   };
 }
 
 export async function listTargets(): Promise<TargetRef[]> {
+  return (await listTargetSnapshot()).targets;
+}
+
+async function listTargetSnapshot(): Promise<TargetSnapshot> {
   if (process.platform === "darwin") {
-    const targets = await listMacOSTargets().catch(() => undefined);
+    let macOSError: unknown;
+    const targets = await listMacOSTargets().catch((error) => {
+      macOSError = error;
+      return undefined;
+    });
     if (targets && targets.length > 0) {
-      return targets;
+      return {
+        targets,
+        targetSource: "macos",
+      };
     }
+    return {
+      targets: deterministicTargets(),
+      targetSource: "deterministic_fallback",
+      targetDiscoveryError: macOSError instanceof Error ? macOSError.message : String(macOSError ?? "macOS target discovery returned no targets"),
+    };
   }
 
-  return deterministicTargets();
+  return {
+    targets: deterministicTargets(),
+    targetSource: "deterministic_fallback",
+  };
 }
 
 function deterministicTargets(): TargetRef[] {
@@ -567,18 +597,20 @@ function extractRequestId(value: unknown): string {
 async function handleParsedRequest(request: HelperRequest) {
   switch (request.method) {
     case "doctor": {
-      const targets = await listTargets();
-      return createHelperStatus(targets.length);
+      const snapshot = await listTargetSnapshot();
+      return createHelperStatus(snapshot.targets.length, snapshot);
     }
     case "list_targets": {
-      const targets = await listTargets();
+      const snapshot = await listTargetSnapshot();
       return RecorderHelperTargetsSchema.parse({
-        status: createHelperStatus(targets.length),
-        targets,
+        status: createHelperStatus(snapshot.targets.length, snapshot),
+        targets: snapshot.targets,
       });
     }
     case "permissions_status":
       return createPermissionStatus();
+    case "permissions_probe":
+      return createPermissionProbeStatus();
     case "permissions_request":
       return createPermissionRequestResult();
     case "start_session":
@@ -1045,6 +1077,78 @@ function createPermissionRequestResult() {
   });
 }
 
+async function createPermissionProbeStatus() {
+  const configured = createPermissionStatus();
+  if (process.env.SPORES_PERMISSION_NATIVE_PROBE === "skip") {
+    return PermissionBrokerStatusSchema.parse({
+      ...configured,
+      mode: "native_probe",
+    });
+  }
+  if (process.platform !== "darwin") {
+    return PermissionBrokerStatusSchema.parse({
+      ...configured,
+      mode: "native_probe",
+    });
+  }
+
+  if (configured.requiresUserAction) {
+    return PermissionBrokerStatusSchema.parse({
+      ...configured,
+      mode: "native_probe",
+    });
+  }
+
+  const probeDir = await mkdtemp(path.join(os.tmpdir(), "spores-permission-probe-"));
+  const probePath = path.join(probeDir, "probe.png");
+  try {
+    await execFileUtf8("/usr/sbin/screencapture", ["-x", "-R0,0,1,1", probePath], 4_000);
+    const probeStat = await stat(probePath);
+    if (!probeStat.isFile() || probeStat.size === 0) {
+      throw new Error(`permission probe artifact is empty: ${probePath}`);
+    }
+    return PermissionBrokerStatusSchema.parse({
+      ...configured,
+      mode: "native_probe",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const capabilities = configured.capabilities.map((capability) => (
+      capability.permission === "screenRecording"
+        ? {
+            ...capability,
+            status: "degraded" as const,
+            reason: `Native screen recording probe failed: ${message}`,
+          }
+        : capability
+    ));
+    return PermissionBrokerStatusSchema.parse({
+      platform: configured.platform,
+      mode: "native_probe",
+      snapshot: {
+        ...configured.snapshot,
+        screenRecording: "degraded",
+        requiresUserAction: true,
+      },
+      capabilities,
+      requiresUserAction: true,
+      error: {
+        code: "permission_probe_failed",
+        message,
+        retriable: true,
+        requiresUserAction: true,
+        details: {
+          command: "/usr/sbin/screencapture",
+          args: ["-x", "-R0,0,1,1", probePath],
+          settingsUrl: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+        },
+      },
+    });
+  } finally {
+    await rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 function readPermissionState(name: string, fallback: PermissionState): PermissionState {
   const value = process.env[`SPORES_PERMISSION_${name}`];
   const parsed = PermissionStateSchema.safeParse(value);
@@ -1070,10 +1174,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (process.argv.includes("--stdio")) {
     process.exitCode = await runStdio();
   } else if (process.argv.includes("--list-targets")) {
-    const targets = await listTargets();
-    process.stdout.write(`${JSON.stringify({ status: createHelperStatus(targets.length), targets }, null, 2)}\n`);
+    const snapshot = await listTargetSnapshot();
+    process.stdout.write(`${JSON.stringify({ status: createHelperStatus(snapshot.targets.length, snapshot), targets: snapshot.targets }, null, 2)}\n`);
   } else {
-    const targets = await listTargets();
-    process.stdout.write(`${JSON.stringify(createHelperStatus(targets.length), null, 2)}\n`);
+    const snapshot = await listTargetSnapshot();
+    process.stdout.write(`${JSON.stringify(createHelperStatus(snapshot.targets.length, snapshot), null, 2)}\n`);
   }
 }

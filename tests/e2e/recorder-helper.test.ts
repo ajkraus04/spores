@@ -57,7 +57,7 @@ describe("recorder helper process e2e", () => {
       expect(target.bounds!.width).toBeGreaterThan(0);
       expect(target.bounds!.height).toBeGreaterThan(0);
     }
-  });
+  }, 20_000);
 
   it("responds to doctor and list_targets over stdio", async () => {
     const doctor = RecorderHelperStatusSchema.parse(
@@ -72,7 +72,7 @@ describe("recorder helper process e2e", () => {
     expect(targets.status.targetCount).toBe(targets.targets.length);
     expect(targets.targets.some((target) => target.kind === "display")).toBe(true);
     expect(targets.targets.some((target) => target.kind === "window")).toBe(true);
-  });
+  }, 20_000);
 
   it("reports permission status and request guidance over stdio", async () => {
     const status = PermissionBrokerStatusSchema.parse(
@@ -107,6 +107,28 @@ describe("recorder helper process e2e", () => {
       status: { requiresUserAction: true },
     });
     expect(request.actions.map((action) => action.permission)).toEqual(["screenRecording"]);
+  });
+
+  it("reports permission probe status over stdio", async () => {
+    const probe = PermissionBrokerStatusSchema.parse(
+      await sendStdioRequest(
+        { id: "req_permissions_probe", method: "permissions_probe" },
+        { SPORES_PERMISSION_SCREEN_RECORDING: "missing" },
+      ),
+    );
+    expect(probe).toMatchObject({
+      mode: "native_probe",
+      requiresUserAction: true,
+      snapshot: {
+        screenRecording: "missing",
+        requiresUserAction: true,
+      },
+    });
+    expect(probe.capabilities.find((capability) => capability.permission === "screenRecording")).toMatchObject({
+      required: true,
+      status: "missing",
+      canRequest: process.platform === "darwin",
+    });
   });
 
   it("preserves request ids when helper request params are invalid", async () => {

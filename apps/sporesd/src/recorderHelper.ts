@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 import {
@@ -47,6 +50,7 @@ type HelperMethod =
   | "doctor"
   | "list_targets"
   | "permissions_status"
+  | "permissions_probe"
   | "permissions_request"
   | "start_session"
   | "get_status"
@@ -67,6 +71,7 @@ const HelperResponseSchema = z.discriminatedUnion("ok", [
       message: z.string(),
       retriable: z.boolean(),
       requiresUserAction: z.boolean(),
+      details: z.record(z.string(), z.unknown()).optional(),
     }),
   }),
 ]);
@@ -85,7 +90,7 @@ export class RecorderHelperClient {
         "--",
         "--stdio",
       ],
-      cwd: config.cwd ?? process.cwd(),
+      cwd: config.cwd ?? env.SPORES_RECORDER_HELPER_CWD ?? findDefaultHelperCwd() ?? process.cwd(),
       env: config.env ?? env,
       timeoutMs: config.timeoutMs ?? Number(env.SPORES_RECORDER_HELPER_TIMEOUT_MS ?? 45_000),
     };
@@ -117,6 +122,14 @@ export class RecorderHelperClient {
   async permissionsStatus(): Promise<PermissionBrokerStatus> {
     try {
       return PermissionBrokerStatusSchema.parse(await this.request("permissions_status"));
+    } catch (error) {
+      return this.unavailablePermissionStatus(error);
+    }
+  }
+
+  async permissionsProbe(): Promise<PermissionBrokerStatus> {
+    try {
+      return PermissionBrokerStatusSchema.parse(await this.request("permissions_probe"));
     } catch (error) {
       return this.unavailablePermissionStatus(error);
     }
@@ -189,6 +202,7 @@ export class RecorderHelperClient {
         message: error instanceof Error ? error.message : String(error),
         retriable: true,
         requiresUserAction: false,
+        details: this.helperErrorDetails(),
       },
     });
   }
@@ -256,8 +270,26 @@ export class RecorderHelperClient {
         message,
         retriable: true,
         requiresUserAction: false,
+        details: this.helperErrorDetails(),
       },
     });
+  }
+
+  private helperErrorDetails(): Record<string, unknown> {
+    return {
+      command: this.config.command,
+      args: this.config.args,
+      cwd: this.config.cwd,
+      timeoutMs: this.config.timeoutMs,
+      executablePresent: executablePresent(this.config.command, this.config.env),
+      cwdPackageJsonPresent: existsSync(path.join(this.config.cwd, "package.json")),
+      suggestedCommands: [
+        `cd ${this.config.cwd}`,
+        "bun install",
+        "bun run --silent recorder-helper -- --stdio",
+        "bun run --silent mcp:doctor -- --json",
+      ],
+    };
   }
 
   private createProcess(): RecorderHelperProcess {
@@ -466,6 +498,7 @@ function helperResponseError(error: {
   message: string;
   retriable: boolean;
   requiresUserAction: boolean;
+  details?: Record<string, unknown>;
 }): Error {
   return new Error(`recorder helper ${error.code}: ${error.message}`);
 }
@@ -483,4 +516,53 @@ function parseArgList(value: string | undefined): string[] | undefined {
     return z.array(z.string()).parse(JSON.parse(trimmed));
   }
   return trimmed.split(/\s+/);
+}
+
+function findDefaultHelperCwd(): string | undefined {
+  let current = path.dirname(fileURLToPath(import.meta.url));
+  for (let depth = 0; depth < 8; depth += 1) {
+    const packageJsonPath = path.join(current, "package.json");
+    if (existsSync(packageJsonPath) && packageHasRecorderHelperScript(packageJsonPath)) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+  return undefined;
+}
+
+function packageHasRecorderHelperScript(packageJsonPath: string): boolean {
+  try {
+    const parsed = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+      scripts?: Record<string, unknown>;
+      workspaces?: unknown;
+    };
+    return typeof parsed.scripts?.["recorder-helper"] === "string";
+  } catch {
+    return false;
+  }
+}
+
+function executablePresent(command: string, env: NodeJS.ProcessEnv): boolean {
+  if (command.includes(path.sep) || (process.platform === "win32" && command.includes("\\"))) {
+    return existsSync(command);
+  }
+  const pathValue = env.PATH ?? process.env.PATH ?? "";
+  const pathExts = process.platform === "win32"
+    ? (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")
+    : [""];
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (!dir) {
+      continue;
+    }
+    for (const ext of pathExts) {
+      if (existsSync(path.join(dir, `${command}${ext}`))) {
+        return true;
+      }
+    }
+  }
+  return false;
 }

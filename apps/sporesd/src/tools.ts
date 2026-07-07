@@ -2,25 +2,33 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 import {
+  AppendAgentStepInputSchema,
   AppendEventInputSchema,
+  ArtifactReadInputSchema,
   ArtifactInputSchema,
   BeginRecordingInputSchema,
+  ContextSnapshotInputSchema,
   HelperTargetsInputSchema,
   PermissionsRequestInputSchema,
   PermissionsStatusInputSchema,
   ReadyInputSchema,
   RecordActiveWindowInputSchema,
   RecordAppInputSchema,
+  RecordCaptureInputSchema,
   RecordRegionInputSchema,
   RecordTargetInputSchema,
   RecordWindowInputSchema,
+  RecordingResultInputSchema,
   ResolveTargetInputSchema,
   SporesServiceError,
   SporesService,
   StartRecordingInputSchema,
   StatusInputSchema,
   StopInputSchema,
+  TargetSelectInputSchema,
+  TargetValidateInputSchema,
   TimelineInputSchema,
+  TimelineQueryInputSchema,
 } from "./service.js";
 
 type JsonObject = Record<string, unknown>;
@@ -29,12 +37,15 @@ export type ToolDefinition = {
   name: string;
   description: string;
   inputSchema: z.ZodType;
+  outputSchema?: z.ZodType;
   execute(input: never): Promise<unknown>;
   readOnly?: boolean;
 };
 
+const LooseOutputSchema = z.object({}).passthrough();
+
 export function createToolDefinitions(service: SporesService) {
-  return [
+  return withDefaultOutputSchemas([
     {
       name: "spores_doctor",
       description: "Return local Spores health, recorder backend status, and recorder-helper status.",
@@ -64,6 +75,13 @@ export function createToolDefinitions(service: SporesService) {
       execute: async (input) => service.listTargets(input),
     },
     {
+      name: "recorder_context_snapshot",
+      description: "Return a bounded snapshot of capturable displays, apps, windows, active window, and coordinate space.",
+      inputSchema: ContextSnapshotInputSchema,
+      readOnly: true,
+      execute: async (input) => service.contextSnapshot(input),
+    },
+    {
       name: "recorder_target_resolve",
       description: "Resolve a fuzzy agent target selector into one capture target with scored alternatives.",
       inputSchema: ResolveTargetInputSchema,
@@ -71,11 +89,32 @@ export function createToolDefinitions(service: SporesService) {
       execute: async (input) => service.resolveTarget(input),
     },
     {
+      name: "recorder_target_select",
+      description: "Resolve a target selector using an agent policy for confidence and ambiguity.",
+      inputSchema: TargetSelectInputSchema,
+      readOnly: true,
+      execute: async (input) => service.selectTarget(input),
+    },
+    {
+      name: "recorder_target_validate",
+      description: "Validate that a previously selected target still exists and return its capture plan.",
+      inputSchema: TargetValidateInputSchema,
+      readOnly: true,
+      execute: async (input) => service.validateTarget(input),
+    },
+    {
       name: "recorder_permissions_status",
       description: "Return required and optional local recording permission state.",
       inputSchema: PermissionsStatusInputSchema,
       readOnly: true,
       execute: async (input) => service.permissionsStatus(input),
+    },
+    {
+      name: "recorder_permissions_probe",
+      description: "Run a native permission probe and return whether the current launcher can actually capture pixels.",
+      inputSchema: PermissionsStatusInputSchema,
+      readOnly: true,
+      execute: async (input) => service.permissionsProbe(input),
     },
     {
       name: "recorder_permissions_request",
@@ -88,6 +127,12 @@ export function createToolDefinitions(service: SporesService) {
       description: "Resolve a target selector and start a recording for unknown-duration tasks using a safety cap.",
       inputSchema: BeginRecordingInputSchema,
       execute: async (input) => service.begin(input),
+    },
+    {
+      name: "session_recording_capture",
+      description: "Preferred one-shot agent capture: select a target, record for a bounded duration, stop, and return result summary.",
+      inputSchema: RecordCaptureInputSchema,
+      execute: async (input) => service.recordCapture(input),
     },
     {
       name: "session_recording_record_target",
@@ -145,11 +190,31 @@ export function createToolDefinitions(service: SporesService) {
       execute: async (input) => service.appendEvent(input),
     },
     {
+      name: "session_recording_append_agent_step",
+      description: "Append a structured agent decision, action, observation, or assertion event to a run.",
+      inputSchema: AppendAgentStepInputSchema,
+      execute: async (input) => service.appendAgentStep(input),
+    },
+    {
       name: "session_recording_get_timeline",
       description: "Read the normalized timeline for a run bundle.",
       inputSchema: TimelineInputSchema,
       readOnly: true,
       execute: async (input) => service.timeline(input),
+    },
+    {
+      name: "session_recording_query_timeline",
+      description: "Page and search a run timeline with compact event summaries and optional payloads/frames.",
+      inputSchema: TimelineQueryInputSchema,
+      readOnly: true,
+      execute: async (input) => service.queryTimeline(input),
+    },
+    {
+      name: "session_recording_result",
+      description: "Return a bounded run result with artifact verification and optional timeline details.",
+      inputSchema: RecordingResultInputSchema,
+      readOnly: true,
+      execute: async (input) => service.recordingResult(input),
     },
     {
       name: "session_recording_get_artifact",
@@ -158,7 +223,14 @@ export function createToolDefinitions(service: SporesService) {
       readOnly: true,
       execute: async (input) => service.artifact(input),
     },
-  ] satisfies ToolDefinition[];
+    {
+      name: "session_recording_read_artifact",
+      description: "Read an artifact as metadata, bounded text, or bounded base64 content.",
+      inputSchema: ArtifactReadInputSchema,
+      readOnly: true,
+      execute: async (input) => service.readArtifact(input),
+    },
+  ] satisfies ToolDefinition[]);
 }
 
 export function mcpOk(value: unknown): CallToolResult {
@@ -177,6 +249,14 @@ export function mcpError(error: unknown): CallToolResult {
         requiresUserAction: error.requiresUserAction,
         details: error.details,
       }
+    : error instanceof z.ZodError
+    ? {
+        error: "invalid_input",
+        message: z.prettifyError(error),
+        retriable: false,
+        requiresUserAction: false,
+        details: { issues: error.issues },
+      }
     : error instanceof Error
     ? { error: "internal_error", message: error.message, retriable: false, requiresUserAction: false }
     : { error: "internal_error", message: String(error), retriable: false, requiresUserAction: false };
@@ -192,4 +272,11 @@ function toStructuredContent(value: unknown): JsonObject {
     return value as JsonObject;
   }
   return { value };
+}
+
+function withDefaultOutputSchemas(definitions: ToolDefinition[]): ToolDefinition[] {
+  return definitions.map((definition) => ({
+    ...definition,
+    outputSchema: definition.outputSchema ?? LooseOutputSchema,
+  }));
 }
