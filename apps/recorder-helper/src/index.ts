@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
@@ -8,6 +9,7 @@ import { z } from "zod";
 
 import {
   ArtifactRefSchema,
+  BoundsSchema,
   FrameRefSchema,
   PermissionBrokerStatusSchema,
   PermissionCapability,
@@ -28,6 +30,150 @@ import {
 
 const VERSION = "0.1.0";
 const PROTOCOL_VERSION = 1;
+const MACOS_TARGET_SNAPSHOT_SCRIPT = String.raw`
+import AppKit
+import CoreGraphics
+import Foundation
+
+func intValue(_ value: Any?) -> Int? {
+  if let number = value as? NSNumber {
+    return number.intValue
+  }
+  if let value = value as? Int {
+    return value
+  }
+  if let value = value as? String {
+    return Int(value)
+  }
+  return nil
+}
+
+func doubleValue(_ value: Any?) -> Double? {
+  if let number = value as? NSNumber {
+    return number.doubleValue
+  }
+  if let value = value as? Double {
+    return value
+  }
+  if let value = value as? Int {
+    return Double(value)
+  }
+  if let value = value as? String {
+    return Double(value)
+  }
+  return nil
+}
+
+func stringValue(_ value: Any?) -> String? {
+  if let value = value as? String, !value.isEmpty {
+    return value
+  }
+  if let number = value as? NSNumber {
+    return number.stringValue
+  }
+  return nil
+}
+
+func boundsPayload(x: Double, y: Double, width: Double, height: Double) -> [String: Any] {
+  return [
+    "x": x,
+    "y": y,
+    "width": max(0, width),
+    "height": max(0, height),
+  ]
+}
+
+func boundsPayload(_ raw: Any?) -> [String: Any]? {
+  guard let dict = raw as? [String: Any],
+    let x = doubleValue(dict["X"]),
+    let y = doubleValue(dict["Y"]),
+    let width = doubleValue(dict["Width"]),
+    let height = doubleValue(dict["Height"]),
+    width > 0,
+    height > 0
+  else {
+    return nil
+  }
+  return boundsPayload(x: x, y: y, width: width, height: height)
+}
+
+let maxDisplays = 32
+var displayIds = [CGDirectDisplayID](repeating: 0, count: maxDisplays)
+var displayCount: UInt32 = 0
+CGGetActiveDisplayList(UInt32(maxDisplays), &displayIds, &displayCount)
+let mainDisplayId = CGMainDisplayID()
+let activeDisplays = Array(displayIds.prefix(Int(displayCount))).sorted {
+  if $0 == mainDisplayId {
+    return true
+  }
+  if $1 == mainDisplayId {
+    return false
+  }
+  return $0 < $1
+}
+
+var displays: [[String: Any]] = []
+for (index, displayId) in activeDisplays.enumerated() {
+  let rect = CGDisplayBounds(displayId)
+  let publicDisplayId = displayId == mainDisplayId ? "main" : String(index + 1)
+  displays.append([
+    "targetId": displayId == mainDisplayId ? "display:main" : "display:\(index + 1)",
+    "displayId": publicDisplayId,
+    "bounds": boundsPayload(x: rect.origin.x, y: rect.origin.y, width: rect.width, height: rect.height),
+  ])
+}
+
+let windowOptions = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
+let rawWindows = CGWindowListCopyWindowInfo(windowOptions, kCGNullWindowID) as? [[String: Any]] ?? []
+var windows: [[String: Any]] = []
+var zOrder = 0
+
+for window in rawWindows {
+  let layer = intValue(window[kCGWindowLayer as String]) ?? -1
+  if layer != 0 {
+    continue
+  }
+  let alpha = doubleValue(window[kCGWindowAlpha as String]) ?? 1
+  if alpha <= 0 {
+    continue
+  }
+  guard let windowId = stringValue(window[kCGWindowNumber as String]),
+    let bounds = boundsPayload(window[kCGWindowBounds as String])
+  else {
+    continue
+  }
+
+  let processId = intValue(window[kCGWindowOwnerPID as String])
+  let runningApp = processId.flatMap { NSRunningApplication(processIdentifier: pid_t($0)) }
+  let ownerName = stringValue(window[kCGWindowOwnerName as String])
+  let appName = runningApp?.localizedName ?? ownerName ?? "Unknown App"
+
+  var payload: [String: Any] = [
+    "id": windowId,
+    "appName": appName,
+    "bounds": bounds,
+    "zOrder": zOrder,
+  ]
+  if let title = stringValue(window[kCGWindowName as String]) {
+    payload["title"] = title
+  }
+  if let processId = processId {
+    payload["processId"] = processId
+  }
+  if let bundleId = runningApp?.bundleIdentifier, !bundleId.isEmpty {
+    payload["bundleId"] = bundleId
+  }
+  windows.append(payload)
+  zOrder += 1
+}
+
+let payload: [String: Any] = [
+  "displays": displays,
+  "windows": windows,
+]
+let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+FileHandle.standardOutput.write(data)
+`;
 
 const HelperRequestSchema = z.object({
   id: z.string(),
@@ -62,6 +208,46 @@ const SessionParamsSchema = z.object({
   purpose: z.string().optional(),
   eventCount: z.number().int().nonnegative().default(0),
   frameCount: z.number().int().nonnegative().default(0),
+  capture: z
+    .object({
+      mode: z.enum(["synthetic", "native"]).default("synthetic"),
+      maxDurationSeconds: z.number().int().min(1).max(30).default(2),
+    })
+    .default({ mode: "synthetic", maxDurationSeconds: 2 }),
+});
+
+const NativeCaptureStateSchema = z.object({
+  mode: z.literal("native"),
+  pid: z.number().int().positive(),
+  outputPath: z.string(),
+  startedAt: z.string().datetime(),
+  expectedStopAt: z.string().datetime(),
+  maxDurationSeconds: z.number().int().positive(),
+  displayNumber: z.number().int().positive().optional(),
+  windowId: z.string().optional(),
+  region: BoundsSchema.optional(),
+  captureArgs: z.array(z.string()).optional(),
+});
+
+const MacOSDisplayTargetSchema = z.object({
+  targetId: z.string(),
+  displayId: z.string(),
+  bounds: BoundsSchema,
+});
+
+const MacOSWindowTargetSchema = z.object({
+  id: z.string(),
+  title: z.string().optional(),
+  appName: z.string(),
+  bundleId: z.string().optional(),
+  processId: z.number().int().optional(),
+  bounds: BoundsSchema,
+  zOrder: z.number().int().nonnegative(),
+});
+
+const MacOSTargetSnapshotSchema = z.object({
+  displays: z.array(MacOSDisplayTargetSchema),
+  windows: z.array(MacOSWindowTargetSchema),
 });
 
 export function createHelperStatus(targetCount: number) {
@@ -85,12 +271,24 @@ export function createHelperStatus(targetCount: number) {
   };
 }
 
-export function listTargets(): TargetRef[] {
+export async function listTargets(): Promise<TargetRef[]> {
+  if (process.platform === "darwin") {
+    const targets = await listMacOSTargets().catch(() => undefined);
+    if (targets && targets.length > 0) {
+      return targets;
+    }
+  }
+
+  return deterministicTargets();
+}
+
+function deterministicTargets(): TargetRef[] {
   return [
     TargetRefSchema.parse({
       targetId: "display:main",
       kind: "display",
       displayId: "main",
+      bounds: { x: 0, y: 0, width: 1440, height: 900 },
       app: {
         name: "Desktop",
         bundleId: platformDesktopBundleId(),
@@ -116,6 +314,8 @@ export function listTargets(): TargetRef[] {
       targetId: "window:spores-recorder-helper:status",
       kind: "window",
       displayId: "main",
+      bounds: { x: 80, y: 80, width: 1024, height: 640 },
+      zOrder: 0,
       app: {
         name: "Spores Recorder Helper",
         bundleId: "dev.spores.recorder-helper",
@@ -129,6 +329,171 @@ export function listTargets(): TargetRef[] {
       safeToPersist: true,
     }),
   ];
+}
+
+async function listMacOSTargets(): Promise<TargetRef[]> {
+  const snapshot = MacOSTargetSnapshotSchema.parse(
+    JSON.parse(await execFileUtf8("/usr/bin/swift", ["-e", MACOS_TARGET_SNAPSHOT_SCRIPT], 4_000)),
+  );
+  const targets: TargetRef[] = [];
+  const seen = new Set<string>();
+
+  for (const display of snapshot.displays) {
+    const target = TargetRefSchema.parse({
+      targetId: display.targetId,
+      kind: "display",
+      displayId: display.displayId,
+      bounds: display.bounds,
+      app: {
+        name: "Desktop",
+        bundleId: platformDesktopBundleId(),
+      },
+      window: {
+        id: "desktop",
+        title: display.displayId === "main" ? "Main Display" : `Display ${display.displayId}`,
+        bounds: display.bounds,
+      },
+      safeToPersist: true,
+    });
+    targets.push(target);
+    seen.add(target.targetId);
+  }
+
+  const appTargets = new Map<string, {
+    targetId: string;
+    appName: string;
+    bundleId?: string;
+    processId?: number;
+    bounds: z.infer<typeof BoundsSchema>;
+    zOrder: number;
+  }>();
+  for (const window of snapshot.windows) {
+    const targetId = appTargetId(window);
+    const existing = appTargets.get(targetId);
+    if (!existing) {
+      appTargets.set(targetId, {
+        targetId,
+        appName: window.appName,
+        bundleId: window.bundleId,
+        processId: window.processId,
+        bounds: window.bounds,
+        zOrder: window.zOrder,
+      });
+      continue;
+    }
+    existing.bounds = unionBounds(existing.bounds, window.bounds);
+    existing.zOrder = Math.min(existing.zOrder, window.zOrder);
+  }
+
+  for (const app of [...appTargets.values()].sort((left, right) => left.zOrder - right.zOrder)) {
+    if (seen.has(app.targetId)) {
+      continue;
+    }
+    targets.push(TargetRefSchema.parse({
+      targetId: app.targetId,
+      kind: "app",
+      displayId: displayIdForBounds(app.bounds, snapshot.displays),
+      bounds: app.bounds,
+      zOrder: app.zOrder,
+      app: {
+        name: app.appName,
+        bundleId: app.bundleId,
+        processId: app.processId,
+      },
+      safeToPersist: true,
+    }));
+    seen.add(app.targetId);
+  }
+
+  for (const window of snapshot.windows) {
+    const targetId = `window:${window.id}`;
+    if (seen.has(targetId)) {
+      continue;
+    }
+    targets.push(TargetRefSchema.parse({
+      targetId,
+      kind: "window",
+      displayId: displayIdForBounds(window.bounds, snapshot.displays),
+      bounds: window.bounds,
+      zOrder: window.zOrder,
+      app: {
+        name: window.appName,
+        bundleId: window.bundleId,
+        processId: window.processId,
+      },
+      window: {
+        id: window.id,
+        title: window.title,
+        bounds: window.bounds,
+      },
+      safeToPersist: true,
+    }));
+    seen.add(targetId);
+  }
+
+  return targets;
+}
+
+function appTargetId(window: z.infer<typeof MacOSWindowTargetSchema>): string {
+  if (window.bundleId) {
+    return `app:${window.bundleId}`;
+  }
+  if (window.processId) {
+    return `app:pid:${window.processId}`;
+  }
+  return `app:${slugifyTargetPart(window.appName)}`;
+}
+
+function slugifyTargetPart(value: string): string {
+  const slug = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug.length > 0 ? slug : "unknown";
+}
+
+function unionBounds(
+  left: z.infer<typeof BoundsSchema>,
+  right: z.infer<typeof BoundsSchema>,
+): z.infer<typeof BoundsSchema> {
+  const minX = Math.min(left.x, right.x);
+  const minY = Math.min(left.y, right.y);
+  const maxX = Math.max(left.x + left.width, right.x + right.width);
+  const maxY = Math.max(left.y + left.height, right.y + right.height);
+  return BoundsSchema.parse({
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  });
+}
+
+function displayIdForBounds(
+  bounds: z.infer<typeof BoundsSchema>,
+  displays: Array<z.infer<typeof MacOSDisplayTargetSchema>>,
+): string | undefined {
+  const centerX = bounds.x + bounds.width / 2;
+  const centerY = bounds.y + bounds.height / 2;
+  return displays.find((display) => (
+    centerX >= display.bounds.x &&
+    centerX <= display.bounds.x + display.bounds.width &&
+    centerY >= display.bounds.y &&
+    centerY <= display.bounds.y + display.bounds.height
+  ))?.displayId;
+}
+
+function execFileUtf8(command: string, args: string[], timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(command, args, {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(`${error.message}${stderr ? `: ${stderr.trim()}` : ""}`));
+        return;
+      }
+      resolve(stdout);
+    });
+    child.stdin?.end();
+  });
 }
 
 export async function runStdio(): Promise<number> {
@@ -174,7 +539,7 @@ async function handleRequest(line: string) {
 }
 
 async function handleParsedRequest(request: HelperRequest) {
-  const targets = listTargets();
+  const targets = await listTargets();
   switch (request.method) {
     case "doctor":
       return createHelperStatus(targets.length);
@@ -200,12 +565,17 @@ async function handleParsedRequest(request: HelperRequest) {
 
 async function startSession(params: z.infer<typeof SessionParamsSchema>) {
   await mkdir(params.paths.artifactsDir, { recursive: true });
+  const nativeCapture = params.capture.mode === "native";
+  const nativeState = nativeCapture ? await startNativeCapture(params) : undefined;
   const events = [
     createEvent(params, params.eventCount, "permission.snapshot", helperPermissionSnapshot()),
     createEvent(params, params.eventCount + 1, "recording.started", {
-      purpose: params.purpose ?? "helper-backed synthetic recording",
+      purpose: params.purpose ?? (nativeCapture ? "helper-backed screen recording" : "helper-backed synthetic recording"),
       recorder: "recorder-helper",
-      nativeCapture: false,
+      nativeCapture,
+      captureBackend: nativeCapture ? "screencapture" : "synthetic",
+      maxDurationSeconds: params.capture.maxDurationSeconds,
+      artifactPath: nativeState?.outputPath,
     }),
     createEvent(params, params.eventCount + 2, "target.selected", { target: params.target }),
     createEvent(params, params.eventCount + 3, "app.focused", {
@@ -251,32 +621,45 @@ async function getSessionStatus(params: z.infer<typeof SessionParamsSchema>) {
   const events = await readNdjson(params.paths.events, SporesEventSchema.parse);
   const frames = await readNdjson(params.paths.frames, FrameRefSchema.parse);
   const stopped = events.some((event) => event.type === "recording.stopped");
+  const nativeState = await readNativeCaptureState(params);
+  const artifacts = stopped && nativeState ? await nativeCaptureArtifacts(nativeState) : [];
   return RecorderHelperSessionSchema.parse({
     runId: params.runId,
     sessionId: params.sessionId,
     status: stopped ? "complete" : "recording",
     eventCount: events.length,
     frameCount: frames.length,
-    artifacts: [],
+    artifacts,
   });
 }
 
 async function stopSession(params: z.infer<typeof SessionParamsSchema>) {
   await mkdir(params.paths.artifactsDir, { recursive: true });
-  const frame = createFrame(params, params.frameCount, 1000);
+  const nativeState = await readNativeCaptureState(params);
+  const artifacts = nativeState
+    ? await waitForNativeCaptureArtifacts(nativeState)
+    : [await writeCaptureArtifact(params)];
+  const primaryArtifact = artifacts[0];
+  const frame = createFrame(
+    params,
+    params.frameCount,
+    nativeState ? nativeState.maxDurationSeconds * 1000 : 1000,
+    primaryArtifact?.artifactId,
+  );
   const events = [
     createEvent(params, params.eventCount, "screen.frame", {
       frameId: frame.frameId,
       videoTimeMs: frame.videoTimeMs,
-      synthetic: true,
+      synthetic: nativeState === undefined,
+      artifactId: primaryArtifact?.artifactId,
     }),
     createEvent(params, params.eventCount + 1, "recording.stopped", {
       reason: "requested",
       recorder: "recorder-helper",
-      nativeCapture: false,
+      nativeCapture: nativeState !== undefined,
+      captureBackend: nativeState ? "screencapture" : "synthetic",
     }),
   ];
-  const artifact = await writeCaptureArtifact(params);
 
   await appendFrame(params.paths.frames, frame);
   await appendEvents(params.paths.events, events);
@@ -287,7 +670,7 @@ async function stopSession(params: z.infer<typeof SessionParamsSchema>) {
     status: "complete",
     eventCount: params.eventCount + events.length,
     frameCount: params.frameCount + 1,
-    artifacts: [artifact],
+    artifacts,
   });
 }
 
@@ -311,13 +694,19 @@ function createEvent(
   });
 }
 
-function createFrame(params: z.infer<typeof SessionParamsSchema>, sequence: number, videoTimeMs: number) {
+function createFrame(
+  params: z.infer<typeof SessionParamsSchema>,
+  sequence: number,
+  videoTimeMs: number,
+  artifactId?: string,
+) {
   return FrameRefSchema.parse({
     frameId: `${params.sessionId}:frame:${sequence}`,
     sessionId: params.sessionId,
     sequence,
     monotonicTimeNs: monotonicTimeNs(),
     videoTimeMs,
+    artifactId,
   });
 }
 
@@ -336,6 +725,183 @@ async function writeCaptureArtifact(params: z.infer<typeof SessionParamsSchema>)
     timeRangeMs: [0, 1000],
     redactionState: "not_required",
   });
+}
+
+async function startNativeCapture(params: z.infer<typeof SessionParamsSchema>) {
+  if (process.platform !== "darwin") {
+    throw new Error("native screen recording is currently only available on macOS");
+  }
+
+  const outputPath = path.join(params.paths.artifactsDir, "capture.mp4");
+  const targetOptions = captureTargetOptions(params.target);
+  const args = [
+    "-x",
+    "-v",
+    `-V${params.capture.maxDurationSeconds}`,
+    ...targetOptions.args,
+    outputPath,
+  ];
+  const child = spawn("/usr/sbin/screencapture", args, {
+    cwd: params.paths.runDir,
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+
+  const startedAt = new Date();
+  const state = NativeCaptureStateSchema.parse({
+    mode: "native",
+    pid: child.pid,
+    outputPath,
+    startedAt: startedAt.toISOString(),
+    expectedStopAt: new Date(startedAt.getTime() + params.capture.maxDurationSeconds * 1000).toISOString(),
+    maxDurationSeconds: params.capture.maxDurationSeconds,
+    displayNumber: targetOptions.displayNumber,
+    windowId: targetOptions.windowId,
+    region: targetOptions.region,
+    captureArgs: args.slice(0, -1),
+  });
+  await writeFile(nativeCaptureStatePath(params), `${JSON.stringify(state, null, 2)}\n`);
+  return state;
+}
+
+async function readNativeCaptureState(params: z.infer<typeof SessionParamsSchema>) {
+  const raw = await readFile(nativeCaptureStatePath(params), "utf8").catch(() => undefined);
+  return raw ? NativeCaptureStateSchema.parse(JSON.parse(raw)) : undefined;
+}
+
+async function waitForNativeCaptureArtifacts(state: z.infer<typeof NativeCaptureStateSchema>) {
+  const deadlineMs = Date.now() + state.maxDurationSeconds * 1000 + 5_000;
+  let lastError: unknown;
+
+  while (Date.now() <= deadlineMs) {
+    try {
+      return await nativeCaptureArtifacts(state);
+    } catch (error) {
+      lastError = error;
+      await sleep(100);
+    }
+  }
+
+  throw new Error(`native screen recording did not finish: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
+async function nativeCaptureArtifacts(state: z.infer<typeof NativeCaptureStateSchema>) {
+  const bytes = await readFile(state.outputPath);
+  const artifactStat = await stat(state.outputPath);
+  if (!artifactStat.isFile() || bytes.byteLength === 0) {
+    throw new Error(`native screen recording artifact is empty: ${state.outputPath}`);
+  }
+
+  return [
+    ArtifactRefSchema.parse({
+      artifactId: `art_native_${createHash("sha256").update(state.outputPath).digest("hex").slice(0, 24)}`,
+      kind: "video",
+      path: state.outputPath,
+      mediaType: "video/mp4",
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      bytes: bytes.byteLength,
+      createdAt: new Date(artifactStat.mtimeMs).toISOString(),
+      timeRangeMs: [0, state.maxDurationSeconds * 1000],
+      redactionState: "raw",
+    }),
+  ];
+}
+
+function nativeCaptureStatePath(params: z.infer<typeof SessionParamsSchema>) {
+  return path.join(params.paths.runDir, "native-capture.json");
+}
+
+function captureTargetOptions(target: TargetRef): {
+  args: string[];
+  displayNumber?: number;
+  windowId?: string;
+  region?: z.infer<typeof BoundsSchema>;
+} {
+  const windowId = captureWindowId(target);
+  if (windowId) {
+    return {
+      args: [`-l${windowId}`],
+      windowId,
+    };
+  }
+
+  const region = captureRegionBounds(target);
+  if (region) {
+    return {
+      args: [`-R${formatScreenRect(region)}`],
+      region,
+    };
+  }
+
+  const displayNumber = captureDisplayNumber(target);
+  if (displayNumber) {
+    return {
+      args: [`-D${displayNumber}`],
+      displayNumber,
+    };
+  }
+
+  return { args: [] };
+}
+
+function captureWindowId(target: TargetRef): string | undefined {
+  if (target.kind !== "window") {
+    return undefined;
+  }
+  const candidates = [
+    target.window?.id,
+    target.targetId.startsWith("window:") ? target.targetId.slice("window:".length) : undefined,
+  ];
+  for (const candidate of candidates) {
+    if (candidate && /^[1-9]\d*$/.test(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function captureRegionBounds(target: TargetRef): z.infer<typeof BoundsSchema> | undefined {
+  if (target.kind === "region") {
+    return normalizedScreenRect(target.bounds ?? target.window?.bounds);
+  }
+
+  if ((target.kind === "window" || target.kind === "app") && !captureWindowId(target)) {
+    return normalizedScreenRect(target.bounds ?? target.window?.bounds);
+  }
+
+  return undefined;
+}
+
+function captureDisplayNumber(target: TargetRef): number | undefined {
+  if (target.kind !== "display" || !target.displayId) {
+    return undefined;
+  }
+  if (target.displayId === "main") {
+    return 1;
+  }
+  const parsed = Number.parseInt(target.displayId, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function normalizedScreenRect(bounds: z.infer<typeof BoundsSchema> | undefined): z.infer<typeof BoundsSchema> | undefined {
+  if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+    return undefined;
+  }
+  return BoundsSchema.parse({
+    x: Math.round(bounds.x),
+    y: Math.round(bounds.y),
+    width: Math.max(1, Math.round(bounds.width)),
+    height: Math.max(1, Math.round(bounds.height)),
+  });
+}
+
+function formatScreenRect(bounds: z.infer<typeof BoundsSchema>): string {
+  return `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function appendEvents(filePath: string, events: SporesEvent[]) {
@@ -475,10 +1041,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (process.argv.includes("--stdio")) {
     process.exitCode = await runStdio();
   } else if (process.argv.includes("--list-targets")) {
-    const targets = listTargets();
+    const targets = await listTargets();
     process.stdout.write(`${JSON.stringify({ status: createHelperStatus(targets.length), targets }, null, 2)}\n`);
   } else {
-    const targets = listTargets();
+    const targets = await listTargets();
     process.stdout.write(`${JSON.stringify(createHelperStatus(targets.length), null, 2)}\n`);
   }
 }

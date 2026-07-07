@@ -18,42 +18,60 @@ import {
 const execFileAsync = promisify(execFile);
 
 describe("recorder helper process e2e", () => {
-  it("prints helper status and deterministic targets through Bun scripts", async () => {
+  it("prints helper status and capture targets with screen coordinates through Bun scripts", async () => {
     const status = RecorderHelperStatusSchema.parse(
       JSON.parse(await runHelperScript([])),
     );
     expect(status).toMatchObject({
       available: true,
-      targetCount: 3,
       capabilities: {
         listTargets: true,
         startSession: true,
         stopSession: true,
       },
     });
+    expect(status.targetCount).toBeGreaterThanOrEqual(1);
 
     const targets = RecorderHelperTargetsSchema.parse(
       JSON.parse(await runHelperScript(["--list-targets"])),
     );
-    expect(targets.status).toMatchObject({ available: true, targetCount: 3 });
-    expect(targets.targets.map((target) => target.targetId)).toEqual([
-      "display:main",
-      "app:spores-recorder-helper",
-      "window:spores-recorder-helper:status",
-    ]);
+    expect(targets.status).toMatchObject({ available: true, targetCount: targets.targets.length });
+    expect(targets.targets.map((target) => target.targetId)).toContain("display:main");
+    expect(targets.targets.find((target) => target.targetId === "display:main")).toMatchObject({
+      kind: "display",
+      bounds: expect.objectContaining({ width: expect.any(Number), height: expect.any(Number) }),
+    });
+    expect(new Set(targets.targets.map((target) => target.targetId)).size).toBe(targets.targets.length);
+
+    const windowTargets = targets.targets.filter((target) => target.kind === "window");
+    expect(windowTargets.length).toBeGreaterThan(0);
+    for (const target of windowTargets) {
+      expect(target).toMatchObject({
+        targetId: expect.stringMatching(/^window:/),
+        bounds: expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }),
+        window: {
+          id: expect.any(String),
+          bounds: expect.objectContaining({ width: expect.any(Number), height: expect.any(Number) }),
+        },
+      });
+      expect(target.bounds!.width).toBeGreaterThan(0);
+      expect(target.bounds!.height).toBeGreaterThan(0);
+    }
   });
 
   it("responds to doctor and list_targets over stdio", async () => {
     const doctor = RecorderHelperStatusSchema.parse(
       await sendStdioRequest({ id: "req_doctor", method: "doctor" }),
     );
-    expect(doctor).toMatchObject({ available: true, targetCount: 3 });
+    expect(doctor).toMatchObject({ available: true });
+    expect(doctor.targetCount).toBeGreaterThanOrEqual(1);
 
     const targets = RecorderHelperTargetsSchema.parse(
       await sendStdioRequest({ id: "req_targets", method: "list_targets" }),
     );
-    expect(targets.targets).toHaveLength(3);
-    expect(targets.targets.map((target) => target.kind)).toEqual(["display", "app", "window"]);
+    expect(targets.status.targetCount).toBe(targets.targets.length);
+    expect(targets.targets.some((target) => target.kind === "display")).toBe(true);
+    expect(targets.targets.some((target) => target.kind === "window")).toBe(true);
   });
 
   it("reports permission status and request guidance over stdio", async () => {
@@ -160,7 +178,7 @@ describe("recorder helper process e2e", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 });
 
 async function runHelperScript(args: string[]): Promise<string> {

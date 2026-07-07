@@ -167,7 +167,9 @@ function formatTargets(value: Awaited<ReturnType<ReturnType<typeof createSporesS
     `target_count: ${value.targets.length}`,
     ...value.targets.map((target) => {
       const label = target.window?.title ?? target.app?.name ?? target.displayId ?? target.targetId;
-      return `${target.targetId}\t${target.kind}\t${label}`;
+      const bounds = target.bounds ?? target.window?.bounds;
+      const rect = bounds ? `${bounds.x},${bounds.y},${bounds.width},${bounds.height}` : "-";
+      return `${target.targetId}\t${target.kind}\t${label}\t${rect}`;
     }),
   ];
   if (value.status.error) {

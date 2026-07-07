@@ -53,7 +53,49 @@ describe("sporesd tool handlers", () => {
       status: "complete",
     });
     expect((result as { events: unknown[] }).events).toHaveLength(10);
-  });
+  }, 20_000);
+
+  it("exposes agent-friendly readiness, target resolution, and begin tools", async () => {
+    const service = createSporesService({ rootDir: path.join(tempDir, "runs") });
+    const tools = new Map(createToolDefinitions(service).map((tool) => [tool.name, tool]));
+
+    const ready = await tools.get("recorder_ready")!.execute({} as never);
+    expect(ready).toMatchObject({
+      ready: true,
+      timing: {
+        unknownDurationMode: "start_with_safety_cap_then_stop",
+        maxDurationSeconds: 30,
+      },
+    });
+
+    const resolved = await tools.get("recorder_target_resolve")!.execute({
+      targetId: "display:main",
+    } as never);
+    expect(resolved).toMatchObject({
+      selected: { targetId: "display:main", kind: "display" },
+      confidence: "high",
+    });
+
+    const begun = await tools.get("session_recording_begin")!.execute({
+      runId: "run_tools_begin_001",
+      purpose: "unknown duration tool e2e",
+      target: { targetId: "display:main" },
+      captureMode: "synthetic",
+      safetyCapSeconds: 1,
+    } as never);
+    expect(begun).toMatchObject({
+      runId: "run_tools_begin_001",
+      status: "recording",
+      selection: { selected: { targetId: "display:main" } },
+      timing: {
+        durationKnown: false,
+        safetyCapSeconds: 1,
+      },
+    });
+
+    const stopped = await tools.get("session_recording_stop")!.execute({ runId: "run_tools_begin_001" } as never);
+    expect(stopped).toMatchObject({ runId: "run_tools_begin_001", status: "complete" });
+  }, 20_000);
 
   it("uses fake recorder only when explicitly configured", async () => {
     const service = createSporesService({

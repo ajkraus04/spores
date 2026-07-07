@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,7 @@ import {
 import { createSporesService } from "../../apps/sporesd/src/service.js";
 
 let tempDir: string;
+const itIfNativeScreenCapture = process.platform === "darwin" && existsSync("/usr/sbin/screencapture") ? it : it.skip;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(path.join(os.tmpdir(), "spores-bundle-e2e-"));
@@ -44,7 +46,183 @@ describe("run bundle e2e validation", () => {
     });
     expect(manifest.target).toEqual(started.target);
     expect(manifest.target.kind).not.toBe("fake");
-  });
+  }, 20_000);
+
+  itIfNativeScreenCapture("persists a real timed screen recording movie artifact", async () => {
+    const runId = "run_native_capture_e2e_001";
+    const service = createSporesService({ rootDir: path.join(tempDir, "runs") });
+
+    const started = await service.start({
+      runId,
+      purpose: "validate native timed screen recording",
+      target: { targetId: "display:main" },
+      capture: { mode: "native", maxDurationSeconds: 1 },
+    });
+    expect(started).toMatchObject({
+      runId,
+      status: "recording",
+      eventCount: 7,
+      frameCount: 1,
+      target: {
+        kind: "display",
+        targetId: "display:main",
+      },
+    });
+
+    const stopped = await service.stop({ runId });
+    const paths = service.store.pathsForRun(runId);
+    const manifest = RunManifestSchema.parse(JSON.parse(await readFile(paths.manifest, "utf8")));
+    const events = parseNdjson(await readFile(paths.events, "utf8"), SporesEventSchema.parse);
+    const frames = parseNdjson(await readFile(paths.frames, "utf8"), FrameRefSchema.parse);
+    const timeline = TimelineSchema.parse(await service.timeline({ runId }));
+
+    expect(stopped).toMatchObject({
+      runId,
+      status: "complete",
+      eventCount: 9,
+      frameCount: 2,
+    });
+    expect(manifest).toEqual(stopped);
+    expect(events.map((event) => event.type)).toEqual([
+      "permission.snapshot",
+      "recording.started",
+      "target.selected",
+      "app.focused",
+      "window.changed",
+      "accessibility.tree",
+      "screen.frame",
+      "screen.frame",
+      "recording.stopped",
+    ]);
+    expect(events.map((event) => event.sequence)).toEqual([...Array(events.length).keys()]);
+    expect(events[1]!.payload).toMatchObject({
+      nativeCapture: true,
+      captureBackend: "screencapture",
+      maxDurationSeconds: 1,
+    });
+    expect(events[8]!.payload).toMatchObject({
+      nativeCapture: true,
+      captureBackend: "screencapture",
+    });
+    expect(frames.map((frame) => frame.sequence)).toEqual([0, 1]);
+    expect(frames[1]!.videoTimeMs).toBe(1000);
+
+    const artifact = manifest.artifacts[0];
+    expect(artifact).toMatchObject({
+      kind: "video",
+      mediaType: "video/mp4",
+      redactionState: "raw",
+      timeRangeMs: [0, 1000],
+    });
+    expect(frames[1]!.artifactId).toBe(artifact!.artifactId);
+    expect(timeline.artifacts).toEqual(manifest.artifacts);
+
+    const artifactBytes = await readFile(artifact!.path);
+    const artifactStat = await stat(artifact!.path);
+    expect(path.basename(artifact!.path)).toBe("capture.mp4");
+    expect(artifactStat.isFile()).toBe(true);
+    expect(artifactBytes.byteLength).toBeGreaterThan(1024);
+    expect(artifact!.bytes).toBe(artifactBytes.byteLength);
+    expect(artifact!.sha256).toBe(createHash("sha256").update(artifactBytes).digest("hex"));
+
+    const nativeState = JSON.parse(await readFile(path.join(paths.runDir, "native-capture.json"), "utf8"));
+    expect(nativeState).toMatchObject({
+      mode: "native",
+      outputPath: artifact!.path,
+      maxDurationSeconds: 1,
+    });
+  }, 20_000);
+
+  itIfNativeScreenCapture("persists a native screen recording for a requested region", async () => {
+    const runId = "run_native_region_capture_e2e_001";
+    const service = createSporesService({ rootDir: path.join(tempDir, "runs") });
+    const bounds = { x: 0, y: 0, width: 320, height: 240 };
+
+    const started = await service.start({
+      runId,
+      purpose: "validate native region screen recording",
+      target: { targetId: "region:e2e:top-left", kind: "region", bounds },
+      capture: { mode: "native", maxDurationSeconds: 1 },
+    });
+    expect(started).toMatchObject({
+      runId,
+      status: "recording",
+      target: {
+        kind: "region",
+        targetId: "region:e2e:top-left",
+        bounds,
+      },
+    });
+
+    const stopped = await service.stop({ runId });
+    expect(stopped).toMatchObject({ runId, status: "complete", eventCount: 9, frameCount: 2 });
+    expect(stopped.artifacts[0]).toMatchObject({
+      kind: "video",
+      mediaType: "video/mp4",
+      redactionState: "raw",
+    });
+
+    const artifact = stopped.artifacts[0]!;
+    const bytes = await readFile(artifact.path);
+    expect(bytes.byteLength).toBeGreaterThan(1024);
+    expect(artifact.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+
+    const nativeState = JSON.parse(await readFile(path.join(stopped.paths.runDir, "native-capture.json"), "utf8"));
+    expect(nativeState).toMatchObject({
+      mode: "native",
+      outputPath: artifact.path,
+      region: bounds,
+    });
+    expect(nativeState.captureArgs).toContain("-R0,0,320,240");
+  }, 20_000);
+
+  itIfNativeScreenCapture("persists a native screen recording for a real helper-listed window", async () => {
+    const runId = "run_native_window_capture_e2e_001";
+    const service = createSporesService({ rootDir: path.join(tempDir, "runs") });
+    const targets = await service.listTargets();
+    const windowTarget = targets.targets.find((target) => (
+      target.kind === "window" && /^[1-9]\d*$/.test(target.window?.id ?? "")
+    ));
+    if (!windowTarget) {
+      return;
+    }
+
+    const started = await service.start({
+      runId,
+      purpose: "validate native window screen recording",
+      target: { targetId: windowTarget.targetId },
+      capture: { mode: "native", maxDurationSeconds: 1 },
+    });
+    expect(started.target).toMatchObject({
+      kind: "window",
+      targetId: windowTarget.targetId,
+      bounds: windowTarget.bounds,
+      window: {
+        id: windowTarget.window!.id,
+        bounds: windowTarget.window!.bounds,
+      },
+    });
+
+    const stopped = await service.stop({ runId });
+    expect(stopped).toMatchObject({ runId, status: "complete", eventCount: 9, frameCount: 2 });
+    const artifact = stopped.artifacts[0]!;
+    expect(artifact).toMatchObject({
+      kind: "video",
+      mediaType: "video/mp4",
+      redactionState: "raw",
+    });
+    const bytes = await readFile(artifact.path);
+    expect(bytes.byteLength).toBeGreaterThan(1024);
+    expect(artifact.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+
+    const nativeState = JSON.parse(await readFile(path.join(stopped.paths.runDir, "native-capture.json"), "utf8"));
+    expect(nativeState).toMatchObject({
+      mode: "native",
+      outputPath: artifact.path,
+      windowId: windowTarget.window!.id,
+    });
+    expect(nativeState.captureArgs).toContain(`-l${windowTarget.window!.id}`);
+  }, 20_000);
 
   it("persists a complete schema-valid bundle with contiguous streams and verifiable artifact bytes", async () => {
     const runId = "run_bundle_e2e_001";

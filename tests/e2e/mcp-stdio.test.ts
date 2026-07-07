@@ -1,4 +1,6 @@
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -19,6 +21,7 @@ import {
 type ClientToolResult = Awaited<ReturnType<Client["callTool"]>>;
 
 let tempDir: string;
+const itIfNativeScreenCapture = process.platform === "darwin" && existsSync("/usr/sbin/screencapture") ? it : it.skip;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(path.join(os.tmpdir(), "spores-mcp-e2e-"));
@@ -56,20 +59,35 @@ describe("sporesd MCP stdio e2e", () => {
         "recorder_helper_status",
         "recorder_permissions_request",
         "recorder_permissions_status",
+        "recorder_ready",
+        "recorder_target_resolve",
         "session_recording_append_event",
+        "session_recording_begin",
         "session_recording_get_artifact",
         "session_recording_get_timeline",
+        "session_recording_record_active_window",
+        "session_recording_record_app",
+        "session_recording_record_region",
+        "session_recording_record_target",
+        "session_recording_record_window",
         "session_recording_start",
         "session_recording_status",
         "session_recording_stop",
         "spores_doctor",
       ]);
 
-      const doctor = expectOk<{ ok: true; recorder: "helper"; nativeCapture: false; rootDir: string }>(
+      const doctor = expectOk<{
+        ok: true;
+        recorder: "helper";
+        nativeCapture: false;
+        rootDir: string;
+        helper: { available: boolean; targetCount?: number };
+      }>(
         await client.callTool({ name: "spores_doctor", arguments: {} }),
       );
       expect(doctor).toMatchObject({ ok: true, recorder: "helper", nativeCapture: false, rootDir: runsRoot });
-      expect(doctor).toMatchObject({ helper: { available: true, targetCount: 3 } });
+      expect(doctor).toMatchObject({ helper: { available: true } });
+      expect(doctor.helper.targetCount).toBeGreaterThanOrEqual(1);
 
       const helperStatus = RecorderHelperStatusSchema.parse(
         expectOk(
@@ -83,13 +101,13 @@ describe("sporesd MCP stdio e2e", () => {
         available: true,
         command: bunCommand(),
         args: ["run", "--silent", "recorder-helper", "--", "--stdio"],
-        targetCount: 3,
         capabilities: {
           listTargets: true,
           startSession: true,
           stopSession: true,
         },
       });
+      expect(helperStatus.targetCount).toBeGreaterThanOrEqual(1);
 
       const helperTargets = RecorderHelperTargetsSchema.parse(
         expectOk(
@@ -99,8 +117,50 @@ describe("sporesd MCP stdio e2e", () => {
           }),
         ),
       );
-      expect(helperTargets.status).toMatchObject({ available: true, targetCount: 3 });
-      expect(helperTargets.targets.map((target) => target.kind)).toEqual(["display", "app", "window"]);
+      expect(helperTargets.status).toMatchObject({ available: true, targetCount: helperTargets.targets.length });
+      expect(helperTargets.targets.some((target) => target.kind === "display")).toBe(true);
+      expect(helperTargets.targets.some((target) => target.kind === "window")).toBe(true);
+      expect(helperTargets.targets.find((target) => target.targetId === "display:main")).toMatchObject({
+        bounds: expect.objectContaining({ width: expect.any(Number), height: expect.any(Number) }),
+      });
+      for (const target of helperTargets.targets.filter((target) => target.kind === "window")) {
+        expect(target.window?.bounds).toBeDefined();
+        expect(target.bounds).toEqual(target.window!.bounds);
+      }
+
+      const ready = expectOk<{
+        ready: boolean;
+        targetCount: number;
+        timing: { unknownDurationMode: string; maxDurationSeconds: number };
+      }>(
+        await client.callTool({
+          name: "recorder_ready",
+          arguments: {},
+        }),
+      );
+      expect(ready).toMatchObject({
+        ready: true,
+        targetCount: helperTargets.targets.length,
+        timing: {
+          unknownDurationMode: "start_with_safety_cap_then_stop",
+          maxDurationSeconds: 30,
+        },
+      });
+
+      const resolvedDisplay = expectOk<{
+        selected: { targetId: string; kind: string };
+        confidence: string;
+        score: number;
+      }>(
+        await client.callTool({
+          name: "recorder_target_resolve",
+          arguments: { targetId: "display:main" },
+        }),
+      );
+      expect(resolvedDisplay).toMatchObject({
+        selected: { targetId: "display:main", kind: "display" },
+        confidence: "high",
+      });
 
       const permissions = PermissionBrokerStatusSchema.parse(
         expectOk(
@@ -243,6 +303,90 @@ describe("sporesd MCP stdio e2e", () => {
       const error = SporesErrorSchema.parse(expectError(missingTimeline));
       expect(error).toMatchObject({ error: "internal_error", retriable: false, requiresUserAction: false });
       expect(error.message).toContain("manifest.json");
+    } catch (error) {
+      if (stderr.length > 0) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}\n\nsporesd stderr:\n${stderr}`);
+      }
+      throw error;
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  }, 45_000);
+
+  itIfNativeScreenCapture("records a native region screen movie through MCP stdio", async () => {
+    const runId = "run_mcp_native_capture_e2e_001";
+    const runsRoot = path.join(tempDir, "runs");
+    const bounds = { x: 0, y: 0, width: 320, height: 240 };
+    const client = new Client({ name: "spores-native-capture-e2e-test", version: "0.1.0" });
+    const transport = new StdioClientTransport({
+      command: bunCommand(),
+      args: ["run", "--silent", "mcp"],
+      cwd: repoRoot(),
+      env: childEnv({ SPORES_RUNS_ROOT: runsRoot }),
+      stderr: "pipe",
+    });
+    let stderr = "";
+    transport.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    try {
+      await client.connect(transport);
+
+      const recorded = expectOk<{
+        runId: string;
+        status: string;
+        target: unknown;
+        artifact: unknown;
+        timeline: { eventCount: number; frameCount: number; finalFrameArtifactId?: string };
+        timing: { requestedSeconds: number; durationKnown: boolean };
+      }>(
+        await client.callTool({
+          name: "session_recording_record_region",
+          arguments: {
+            runId,
+            purpose: "mcp native region capture e2e",
+            targetId: "region:mcp:e2e",
+            bounds,
+            seconds: 1,
+          },
+        }),
+      );
+      expect(recorded).toMatchObject({
+        runId,
+        status: "complete",
+        target: { kind: "region", targetId: "region:mcp:e2e", bounds },
+        timing: { requestedSeconds: 1, durationKnown: true },
+        timeline: { eventCount: 9, frameCount: 2 },
+      });
+
+      const artifact = ArtifactRefSchema.parse(recorded.artifact);
+      expect(artifact).toMatchObject({
+        kind: "video",
+        mediaType: "video/mp4",
+        redactionState: "raw",
+      });
+      const bytes = await readFile(artifact.path);
+      expect(bytes.byteLength).toBeGreaterThan(1024);
+      expect(artifact.bytes).toBe(bytes.byteLength);
+      expect(artifact.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+
+      const timeline = TimelineSchema.parse(
+        expectOk(
+          await client.callTool({
+            name: "session_recording_get_timeline",
+            arguments: { runId },
+          }),
+        ),
+      );
+      expect(timeline.frames[1]!.artifactId).toBe(artifact.artifactId);
+      expect(timeline.events[1]!.payload).toMatchObject({
+        nativeCapture: true,
+        captureBackend: "screencapture",
+      });
+      const nativeState = JSON.parse(await readFile(path.join(runsRoot, runId, "native-capture.json"), "utf8"));
+      expect(nativeState).toMatchObject({ region: bounds });
+      expect(nativeState.captureArgs).toContain("-R0,0,320,240");
     } catch (error) {
       if (stderr.length > 0) {
         throw new Error(`${error instanceof Error ? error.message : String(error)}\n\nsporesd stderr:\n${stderr}`);
