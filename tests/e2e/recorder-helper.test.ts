@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 import {
+  PermissionBrokerStatusSchema,
+  PermissionRequestResultSchema,
   RecorderHelperSessionSchema,
   RecorderHelperStatusSchema,
   RecorderHelperTargetsSchema,
@@ -52,6 +54,41 @@ describe("recorder helper process e2e", () => {
     );
     expect(targets.targets).toHaveLength(3);
     expect(targets.targets.map((target) => target.kind)).toEqual(["display", "app", "window"]);
+  });
+
+  it("reports permission status and request guidance over stdio", async () => {
+    const status = PermissionBrokerStatusSchema.parse(
+      await sendStdioRequest(
+        { id: "req_permissions_status", method: "permissions_status" },
+        { SPORES_PERMISSION_SCREEN_RECORDING: "missing" },
+      ),
+    );
+    expect(status).toMatchObject({
+      mode: "deterministic",
+      requiresUserAction: true,
+      snapshot: {
+        screenRecording: "missing",
+        accessibility: "granted",
+        requiresUserAction: true,
+      },
+    });
+    expect(status.capabilities.find((capability) => capability.permission === "screenRecording")).toMatchObject({
+      required: true,
+      status: "missing",
+      canRequest: process.platform === "darwin",
+    });
+
+    const request = PermissionRequestResultSchema.parse(
+      await sendStdioRequest(
+        { id: "req_permissions_request", method: "permissions_request" },
+        { SPORES_PERMISSION_SCREEN_RECORDING: "missing" },
+      ),
+    );
+    expect(request).toMatchObject({
+      opened: false,
+      status: { requiresUserAction: true },
+    });
+    expect(request.actions.map((action) => action.permission)).toEqual(["screenRecording"]);
   });
 
   it("writes lifecycle events, frames, and artifacts over stdio", async () => {
@@ -134,10 +171,13 @@ async function runHelperScript(args: string[]): Promise<string> {
   return stdout;
 }
 
-async function sendStdioRequest(request: { id: string; method: string; params?: unknown }): Promise<unknown> {
+async function sendStdioRequest(
+  request: { id: string; method: string; params?: unknown },
+  env: Record<string, string> = {},
+): Promise<unknown> {
   const child = spawn(bunCommand(), ["run", "--silent", "recorder-helper", "--", "--stdio"], {
     cwd: repoRoot(),
-    env: childEnv(),
+    env: childEnv(env),
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";
@@ -172,6 +212,6 @@ function bunCommand(): string {
   return process.platform === "win32" ? "bun.exe" : "bun";
 }
 
-function childEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, FORCE_COLOR: "0" };
+function childEnv(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return { ...process.env, FORCE_COLOR: "0", ...overrides };
 }

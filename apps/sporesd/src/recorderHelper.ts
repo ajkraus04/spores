@@ -3,6 +3,10 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import {
+  PermissionBrokerStatus,
+  PermissionBrokerStatusSchema,
+  PermissionRequestResult,
+  PermissionRequestResultSchema,
   RecorderHelperStatus,
   RecorderHelperSession,
   RecorderHelperSessionSchema,
@@ -95,6 +99,28 @@ export class RecorderHelperClient {
     }
   }
 
+  async permissionsStatus(): Promise<PermissionBrokerStatus> {
+    try {
+      return PermissionBrokerStatusSchema.parse(await this.request("permissions_status"));
+    } catch (error) {
+      return this.unavailablePermissionStatus(error);
+    }
+  }
+
+  async requestPermissions(): Promise<PermissionRequestResult> {
+    try {
+      return PermissionRequestResultSchema.parse(await this.request("permissions_request"));
+    } catch (error) {
+      const status = this.unavailablePermissionStatus(error);
+      return PermissionRequestResultSchema.parse({
+        status,
+        opened: false,
+        message: "Recorder helper is unavailable; permissions cannot be requested until the helper launches.",
+        actions: [],
+      });
+    }
+  }
+
   async startSession(input: RecorderHelperSessionInput): Promise<RecorderHelperSession> {
     return RecorderHelperSessionSchema.parse(await this.request("start_session", input));
   }
@@ -131,8 +157,82 @@ export class RecorderHelperClient {
     });
   }
 
+  private unavailablePermissionStatus(error: unknown): PermissionBrokerStatus {
+    const message = error instanceof Error ? error.message : String(error);
+    const requiredReason = `Recorder helper is unavailable: ${message}`;
+    return PermissionBrokerStatusSchema.parse({
+      platform: process.platform,
+      mode: "deterministic",
+      snapshot: {
+        platform: process.platform,
+        screenRecording: "degraded",
+        accessibility: "degraded",
+        inputMonitoring: "not_requested",
+        microphone: "not_requested",
+        systemAudio: "not_requested",
+        requiresUserAction: true,
+      },
+      capabilities: [
+        {
+          permission: "screenRecording",
+          label: "Screen Recording",
+          status: "degraded",
+          required: true,
+          canRequest: false,
+          reason: requiredReason,
+        },
+        {
+          permission: "accessibility",
+          label: "Accessibility",
+          status: "degraded",
+          required: true,
+          canRequest: false,
+          reason: requiredReason,
+        },
+        {
+          permission: "inputMonitoring",
+          label: "Input Monitoring",
+          status: "not_requested",
+          required: false,
+          canRequest: false,
+          reason: "Optional richer keyboard metadata for future native capture.",
+        },
+        {
+          permission: "microphone",
+          label: "Microphone",
+          status: "not_requested",
+          required: false,
+          canRequest: false,
+          reason: "Optional narration capture; not used by the current helper-backed lifecycle.",
+        },
+        {
+          permission: "systemAudio",
+          label: "System Audio",
+          status: "not_requested",
+          required: false,
+          canRequest: false,
+          reason: "Optional future system-audio capture.",
+        },
+      ],
+      requiresUserAction: true,
+      error: {
+        code: "helper_unavailable",
+        message,
+        retriable: true,
+        requiresUserAction: false,
+      },
+    });
+  }
+
   private async request(
-    method: "doctor" | "list_targets" | "start_session" | "get_status" | "stop_session",
+    method:
+      | "doctor"
+      | "list_targets"
+      | "permissions_status"
+      | "permissions_request"
+      | "start_session"
+      | "get_status"
+      | "stop_session",
     params?: unknown,
   ): Promise<unknown> {
     const id = `helper_${randomUUID().replaceAll("-", "")}`;

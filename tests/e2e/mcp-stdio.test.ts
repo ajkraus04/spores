@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   ArtifactRefSchema,
+  PermissionBrokerStatusSchema,
+  PermissionRequestResultSchema,
   RecorderHelperStatusSchema,
   RecorderHelperTargetsSchema,
   RunManifestSchema,
@@ -52,6 +54,8 @@ describe("sporesd MCP stdio e2e", () => {
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
         "recorder_helper_list_targets",
         "recorder_helper_status",
+        "recorder_permissions_request",
+        "recorder_permissions_status",
         "session_recording_append_event",
         "session_recording_get_artifact",
         "session_recording_get_timeline",
@@ -97,6 +101,36 @@ describe("sporesd MCP stdio e2e", () => {
       );
       expect(helperTargets.status).toMatchObject({ available: true, targetCount: 3 });
       expect(helperTargets.targets.map((target) => target.kind)).toEqual(["display", "app", "window"]);
+
+      const permissions = PermissionBrokerStatusSchema.parse(
+        expectOk(
+          await client.callTool({
+            name: "recorder_permissions_status",
+            arguments: {},
+          }),
+        ),
+      );
+      expect(permissions).toMatchObject({
+        requiresUserAction: false,
+        snapshot: {
+          screenRecording: "granted",
+          accessibility: "granted",
+        },
+      });
+
+      const permissionRequest = PermissionRequestResultSchema.parse(
+        expectOk(
+          await client.callTool({
+            name: "recorder_permissions_request",
+            arguments: {},
+          }),
+        ),
+      );
+      expect(permissionRequest).toMatchObject({
+        opened: false,
+        message: "All required permissions are already granted.",
+        actions: [],
+      });
 
       const started = RunManifestSchema.parse(
         expectOk(
@@ -209,6 +243,129 @@ describe("sporesd MCP stdio e2e", () => {
       const error = SporesErrorSchema.parse(expectError(missingTimeline));
       expect(error).toMatchObject({ error: "internal_error", retriable: false, requiresUserAction: false });
       expect(error.message).toContain("manifest.json");
+    } catch (error) {
+      if (stderr.length > 0) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}\n\nsporesd stderr:\n${stderr}`);
+      }
+      throw error;
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  }, 20_000);
+
+  it("returns structured permission errors before starting a recording", async () => {
+    const runsRoot = path.join(tempDir, "runs");
+    const client = new Client({ name: "spores-permission-e2e-test", version: "0.1.0" });
+    const transport = new StdioClientTransport({
+      command: bunCommand(),
+      args: ["run", "--silent", "mcp"],
+      cwd: repoRoot(),
+      env: childEnv({
+        SPORES_RUNS_ROOT: runsRoot,
+        SPORES_PERMISSION_SCREEN_RECORDING: "missing",
+      }),
+      stderr: "pipe",
+    });
+    let stderr = "";
+    transport.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    try {
+      await client.connect(transport);
+
+      const permissions = PermissionBrokerStatusSchema.parse(
+        expectOk(
+          await client.callTool({
+            name: "recorder_permissions_status",
+            arguments: {},
+          }),
+        ),
+      );
+      expect(permissions).toMatchObject({
+        requiresUserAction: true,
+        snapshot: {
+          screenRecording: "missing",
+          requiresUserAction: true,
+        },
+      });
+
+      const start = await client.callTool({
+        name: "session_recording_start",
+        arguments: {
+          runId: "run_missing_permission_e2e_001",
+          purpose: "permission failure e2e",
+        },
+      });
+      const error = SporesErrorSchema.parse(expectError(start));
+      expect(error).toMatchObject({
+        error: "missing_permission",
+        retriable: true,
+        requiresUserAction: true,
+      });
+      expect(error.message).toContain("Screen Recording");
+      await expect(stat(path.join(runsRoot, "run_missing_permission_e2e_001", "manifest.json"))).rejects.toThrow();
+    } catch (error) {
+      if (stderr.length > 0) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}\n\nsporesd stderr:\n${stderr}`);
+      }
+      throw error;
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  }, 20_000);
+
+  it("reports helper launch failures through permission tools and recording start", async () => {
+    const runsRoot = path.join(tempDir, "runs");
+    const client = new Client({ name: "spores-helper-unavailable-e2e-test", version: "0.1.0" });
+    const transport = new StdioClientTransport({
+      command: bunCommand(),
+      args: ["run", "--silent", "mcp"],
+      cwd: repoRoot(),
+      env: childEnv({
+        SPORES_RUNS_ROOT: runsRoot,
+        SPORES_RECORDER_HELPER_COMMAND: path.join(tempDir, "missing-helper"),
+      }),
+      stderr: "pipe",
+    });
+    let stderr = "";
+    transport.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    try {
+      await client.connect(transport);
+
+      const permissions = PermissionBrokerStatusSchema.parse(
+        expectOk(
+          await client.callTool({
+            name: "recorder_permissions_status",
+            arguments: {},
+          }),
+        ),
+      );
+      expect(permissions).toMatchObject({
+        requiresUserAction: true,
+        error: {
+          code: "helper_unavailable",
+          retriable: true,
+          requiresUserAction: false,
+        },
+      });
+
+      const start = await client.callTool({
+        name: "session_recording_start",
+        arguments: {
+          runId: "run_helper_unavailable_e2e_001",
+          purpose: "helper unavailable e2e",
+        },
+      });
+      const error = SporesErrorSchema.parse(expectError(start));
+      expect(error).toMatchObject({
+        error: "helper_unavailable",
+        retriable: true,
+        requiresUserAction: false,
+      });
     } catch (error) {
       if (stderr.length > 0) {
         throw new Error(`${error instanceof Error ? error.message : String(error)}\n\nsporesd stderr:\n${stderr}`);

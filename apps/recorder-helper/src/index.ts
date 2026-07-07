@@ -9,6 +9,11 @@ import { z } from "zod";
 import {
   ArtifactRefSchema,
   FrameRefSchema,
+  PermissionBrokerStatusSchema,
+  PermissionCapability,
+  PermissionRequestResultSchema,
+  PermissionState,
+  PermissionStateSchema,
   PermissionSnapshotSchema,
   RecorderHelperSessionSchema,
   RecorderHelperTargetsSchema,
@@ -26,7 +31,16 @@ const PROTOCOL_VERSION = 1;
 
 const HelperRequestSchema = z.object({
   id: z.string(),
-  method: z.enum(["doctor", "list_targets", "start_session", "get_status", "stop_session", "shutdown"]),
+  method: z.enum([
+    "doctor",
+    "list_targets",
+    "permissions_status",
+    "permissions_request",
+    "start_session",
+    "get_status",
+    "stop_session",
+    "shutdown",
+  ]),
   params: z.unknown().optional(),
 });
 
@@ -66,6 +80,7 @@ export function createHelperStatus(targetCount: number) {
       listTargets: true,
       startSession: true,
       stopSession: true,
+      permissions: true,
     },
   };
 }
@@ -168,6 +183,10 @@ async function handleParsedRequest(request: HelperRequest) {
         status: createHelperStatus(targets.length),
         targets,
       });
+    case "permissions_status":
+      return createPermissionStatus();
+    case "permissions_request":
+      return createPermissionRequestResult();
     case "start_session":
       return startSession(SessionParamsSchema.parse(request.params));
     case "get_status":
@@ -336,15 +355,105 @@ async function readNdjson<T>(filePath: string, parse: (value: unknown) => T): Pr
 }
 
 function helperPermissionSnapshot() {
-  return PermissionSnapshotSchema.parse({
+  return createPermissionStatus().snapshot;
+}
+
+function createPermissionStatus() {
+  const snapshot = PermissionSnapshotSchema.parse({
     platform: process.platform,
-    screenRecording: "granted",
-    accessibility: "granted",
-    inputMonitoring: "not_requested",
-    microphone: "not_requested",
-    systemAudio: "not_requested",
+    screenRecording: readPermissionState("SCREEN_RECORDING", "granted"),
+    accessibility: readPermissionState("ACCESSIBILITY", "granted"),
+    inputMonitoring: readPermissionState("INPUT_MONITORING", "not_requested"),
+    microphone: readPermissionState("MICROPHONE", "not_requested"),
+    systemAudio: readPermissionState("SYSTEM_AUDIO", "not_requested"),
     requiresUserAction: false,
   });
+  const capabilities: PermissionCapability[] = [
+    {
+      permission: "screenRecording",
+      label: "Screen Recording",
+      status: snapshot.screenRecording,
+      required: true,
+      canRequest: process.platform === "darwin",
+      reason: "Required to capture pixels from displays, windows, and apps.",
+      settingsUrl: process.platform === "darwin"
+        ? "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        : undefined,
+    },
+    {
+      permission: "accessibility",
+      label: "Accessibility",
+      status: snapshot.accessibility,
+      required: true,
+      canRequest: process.platform === "darwin",
+      reason: "Required to capture UI structure and correlate actions with interface elements.",
+      settingsUrl: process.platform === "darwin"
+        ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        : undefined,
+    },
+    {
+      permission: "inputMonitoring",
+      label: "Input Monitoring",
+      status: snapshot.inputMonitoring,
+      required: false,
+      canRequest: process.platform === "darwin",
+      reason: "Optional richer keyboard metadata for future native capture.",
+      settingsUrl: process.platform === "darwin"
+        ? "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        : undefined,
+    },
+    {
+      permission: "microphone",
+      label: "Microphone",
+      status: snapshot.microphone,
+      required: false,
+      canRequest: process.platform === "darwin",
+      reason: "Optional narration capture; not used by the current helper-backed lifecycle.",
+    },
+    {
+      permission: "systemAudio",
+      label: "System Audio",
+      status: snapshot.systemAudio,
+      required: false,
+      canRequest: false,
+      reason: "Optional future system-audio capture.",
+    },
+  ];
+  const requiresUserAction = capabilities.some((capability) => (
+    capability.required && capability.status !== "granted"
+  ));
+
+  return PermissionBrokerStatusSchema.parse({
+    platform: process.platform,
+    mode: "deterministic",
+    snapshot: {
+      ...snapshot,
+      requiresUserAction,
+    },
+    capabilities,
+    requiresUserAction,
+  });
+}
+
+function createPermissionRequestResult() {
+  const status = createPermissionStatus();
+  const actions = status.capabilities.filter((capability) => (
+    capability.required && capability.status !== "granted"
+  ));
+  return PermissionRequestResultSchema.parse({
+    status,
+    opened: false,
+    message: actions.length === 0
+      ? "All required permissions are already granted."
+      : "Open the listed system settings panes and rerun permissions status after granting access.",
+    actions,
+  });
+}
+
+function readPermissionState(name: string, fallback: PermissionState): PermissionState {
+  const value = process.env[`SPORES_PERMISSION_${name}`];
+  const parsed = PermissionStateSchema.safeParse(value);
+  return parsed.success ? parsed.data : fallback;
 }
 
 function isShutdownResult(value: unknown): value is { shutdown: true } {

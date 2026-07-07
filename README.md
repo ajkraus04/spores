@@ -99,3 +99,24 @@ Run the helper-backed verification gate:
 ```bash
 bun run verify
 ```
+
+## Milestone 5
+
+The helper now exposes a deterministic permission broker over the same stdio
+boundary used for recording. Agents can inspect required and optional capture
+permissions before starting, request user-action guidance, and receive
+machine-readable `missing_permission` errors instead of silent degraded
+recordings.
+
+Inspect permission state:
+
+```bash
+bun run --silent spores -- permissions status --json
+bun run --silent spores -- permissions request --json
+```
+
+Simulate a missing permission for tests:
+
+```bash
+SPORES_PERMISSION_SCREEN_RECORDING=missing bun run --silent spores -- permissions status --json
+```

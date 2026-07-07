@@ -30,6 +30,24 @@ export const RedactionStateSchema = z.enum([
   "not_required",
 ]);
 
+export const PermissionStateSchema = z.enum([
+  "granted",
+  "missing",
+  "pending",
+  "denied",
+  "unsupported",
+  "not_requested",
+  "degraded",
+]);
+
+export const PermissionNameSchema = z.enum([
+  "screenRecording",
+  "accessibility",
+  "inputMonitoring",
+  "microphone",
+  "systemAudio",
+]);
+
 export const EventTypeSchema = z.enum([
   "recording.started",
   "recording.stopped",
@@ -82,12 +100,45 @@ export const TargetRefSchema = z.object({
 
 export const PermissionSnapshotSchema = z.object({
   platform: z.string(),
-  screenRecording: z.enum(["granted", "missing", "pending", "denied", "unsupported", "not_requested", "degraded"]),
-  accessibility: z.enum(["granted", "missing", "pending", "denied", "unsupported", "not_requested", "degraded"]),
-  inputMonitoring: z.enum(["granted", "missing", "pending", "denied", "unsupported", "not_requested", "degraded"]),
-  microphone: z.enum(["granted", "missing", "pending", "denied", "unsupported", "not_requested", "degraded"]),
-  systemAudio: z.enum(["granted", "missing", "pending", "denied", "unsupported", "not_requested", "degraded"]),
+  screenRecording: PermissionStateSchema,
+  accessibility: PermissionStateSchema,
+  inputMonitoring: PermissionStateSchema,
+  microphone: PermissionStateSchema,
+  systemAudio: PermissionStateSchema,
   requiresUserAction: z.boolean(),
+});
+
+export const PermissionCapabilitySchema = z.object({
+  permission: PermissionNameSchema,
+  label: z.string(),
+  status: PermissionStateSchema,
+  required: z.boolean(),
+  canRequest: z.boolean(),
+  reason: z.string(),
+  settingsUrl: z.string().optional(),
+});
+
+export const PermissionBrokerStatusSchema = z.object({
+  platform: z.string(),
+  mode: z.enum(["deterministic", "native_probe"]),
+  snapshot: PermissionSnapshotSchema,
+  capabilities: z.array(PermissionCapabilitySchema),
+  requiresUserAction: z.boolean(),
+  error: z
+    .object({
+      code: z.string(),
+      message: z.string(),
+      retriable: z.boolean(),
+      requiresUserAction: z.boolean(),
+    })
+    .optional(),
+});
+
+export const PermissionRequestResultSchema = z.object({
+  status: PermissionBrokerStatusSchema,
+  opened: z.boolean(),
+  message: z.string(),
+  actions: z.array(PermissionCapabilitySchema),
 });
 
 export const RecorderHelperStatusSchema = z.object({
@@ -106,6 +157,7 @@ export const RecorderHelperStatusSchema = z.object({
       listTargets: z.boolean(),
       startSession: z.boolean(),
       stopSession: z.boolean(),
+      permissions: z.boolean().optional(),
     })
     .optional(),
   error: z
@@ -224,7 +276,12 @@ export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
 export type ArtifactRef = z.infer<typeof ArtifactRefSchema>;
 export type ClockCalibration = z.infer<typeof ClockCalibrationSchema>;
 export type FrameRef = z.infer<typeof FrameRefSchema>;
+export type PermissionBrokerStatus = z.infer<typeof PermissionBrokerStatusSchema>;
+export type PermissionCapability = z.infer<typeof PermissionCapabilitySchema>;
+export type PermissionName = z.infer<typeof PermissionNameSchema>;
+export type PermissionRequestResult = z.infer<typeof PermissionRequestResultSchema>;
 export type PermissionSnapshot = z.infer<typeof PermissionSnapshotSchema>;
+export type PermissionState = z.infer<typeof PermissionStateSchema>;
 export type RecorderHelperStatus = z.infer<typeof RecorderHelperStatusSchema>;
 export type RecorderHelperTargets = z.infer<typeof RecorderHelperTargetsSchema>;
 export type RecorderHelperSession = z.infer<typeof RecorderHelperSessionSchema>;

@@ -5,10 +5,17 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { RecorderHelperTargetsSchema, RunManifestSchema, SporesErrorSchema } from "@spores/schema";
+import {
+  PermissionBrokerStatusSchema,
+  PermissionRequestResultSchema,
+  RecorderHelperTargetsSchema,
+  RunManifestSchema,
+  SporesErrorSchema,
+} from "@spores/schema";
 import { createSporesService } from "../../apps/sporesd/src/service.js";
 
 const execFileAsync = promisify(execFile);
+const CLI_E2E_TIMEOUT_MS = 20_000;
 
 let tempDir: string;
 
@@ -63,7 +70,41 @@ describe("spores CLI e2e", () => {
       "window:spores-recorder-helper:status",
     ]);
     expect(RecorderHelperTargetsSchema.parse(JSON.parse(await runPackageScript("targets", ["--json"], runsRoot))).targets).toHaveLength(3);
-  });
+  }, CLI_E2E_TIMEOUT_MS);
+
+  it("prints permission status and request guidance as JSON from an external CLI process", async () => {
+    const runsRoot = path.join(tempDir, "runs");
+    const env = {
+      SPORES_RUNS_ROOT: runsRoot,
+      SPORES_PERMISSION_ACCESSIBILITY: "missing",
+    };
+
+    const status = PermissionBrokerStatusSchema.parse(
+      JSON.parse(await runSporesCli(["permissions", "status", "--json"], runsRoot, env)),
+    );
+    expect(status).toMatchObject({
+      mode: "deterministic",
+      requiresUserAction: true,
+      snapshot: {
+        screenRecording: "granted",
+        accessibility: "missing",
+        requiresUserAction: true,
+      },
+    });
+    expect(status.capabilities.find((capability) => capability.permission === "accessibility")).toMatchObject({
+      required: true,
+      status: "missing",
+    });
+
+    const request = PermissionRequestResultSchema.parse(
+      JSON.parse(await runSporesCli(["permissions", "request", "--json"], runsRoot, env)),
+    );
+    expect(request).toMatchObject({
+      opened: false,
+      status: { requiresUserAction: true },
+    });
+    expect(request.actions.map((action) => action.permission)).toEqual(["accessibility"]);
+  }, CLI_E2E_TIMEOUT_MS);
 
   it("returns the latest persisted run status across CLI processes", async () => {
     const runsRoot = path.join(tempDir, "runs");
@@ -97,7 +138,7 @@ describe("spores CLI e2e", () => {
         JSON.parse(await runPackageScript("status", ["--json", "--run-id", "run_cli_e2e_001"], runsRoot)),
       ),
     ).toEqual(latest);
-  });
+  }, CLI_E2E_TIMEOUT_MS);
 
   it("returns structured JSON errors for failed CLI commands", async () => {
     const runsRoot = path.join(tempDir, "runs");
@@ -111,7 +152,7 @@ describe("spores CLI e2e", () => {
       requiresUserAction: false,
     });
     expect(error.message).toContain("manifest.json");
-  });
+  }, CLI_E2E_TIMEOUT_MS);
 
   it("recovers stale recording manifests across process boundaries", async () => {
     const runsRoot = path.join(tempDir, "runs");
@@ -142,7 +183,7 @@ describe("spores CLI e2e", () => {
       status: "partial",
       error: { code: "stale_recording" },
     });
-  });
+  }, CLI_E2E_TIMEOUT_MS);
 
   it("recovers completed bundles when helper stop finished before manifest sync", async () => {
     const runsRoot = path.join(tempDir, "runs");
@@ -181,7 +222,7 @@ describe("spores CLI e2e", () => {
       eventCount: 9,
       frameCount: 2,
     });
-  });
+  }, CLI_E2E_TIMEOUT_MS);
 
   it("reports helper launch failures as machine-readable degraded status", async () => {
     const runsRoot = path.join(tempDir, "runs");
@@ -212,7 +253,32 @@ describe("spores CLI e2e", () => {
       },
       targets: [],
     });
-  });
+
+    const permissions = PermissionBrokerStatusSchema.parse(
+      JSON.parse(await runSporesCli(["permissions", "status", "--json"], runsRoot, env)),
+    );
+    expect(permissions).toMatchObject({
+      requiresUserAction: true,
+      error: {
+        code: "helper_unavailable",
+        retriable: true,
+        requiresUserAction: false,
+      },
+      snapshot: {
+        screenRecording: "degraded",
+        accessibility: "degraded",
+      },
+    });
+
+    const permissionRequest = PermissionRequestResultSchema.parse(
+      JSON.parse(await runSporesCli(["permissions", "request", "--json"], runsRoot, env)),
+    );
+    expect(permissionRequest).toMatchObject({
+      opened: false,
+      status: { error: { code: "helper_unavailable" } },
+      actions: [],
+    });
+  }, CLI_E2E_TIMEOUT_MS);
 });
 
 async function runSporesCli(

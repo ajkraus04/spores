@@ -5,6 +5,9 @@ import {
   AppendEventInputSchema,
   ArtifactInputSchema,
   HelperTargetsInputSchema,
+  PermissionsRequestInputSchema,
+  PermissionsStatusInputSchema,
+  SporesServiceError,
   SporesService,
   StartRecordingInputSchema,
   StatusInputSchema,
@@ -26,7 +29,7 @@ export function createToolDefinitions(service: SporesService) {
   return [
     {
       name: "spores_doctor",
-      description: "Return local Spores health, fake-recorder status, and recorder-helper status.",
+      description: "Return local Spores health, recorder backend status, and recorder-helper status.",
       inputSchema: z.object({}),
       readOnly: true,
       execute: async () => service.doctor(),
@@ -44,6 +47,19 @@ export function createToolDefinitions(service: SporesService) {
       inputSchema: HelperTargetsInputSchema,
       readOnly: true,
       execute: async (input) => service.listTargets(input),
+    },
+    {
+      name: "recorder_permissions_status",
+      description: "Return required and optional local recording permission state.",
+      inputSchema: PermissionsStatusInputSchema,
+      readOnly: true,
+      execute: async (input) => service.permissionsStatus(input),
+    },
+    {
+      name: "recorder_permissions_request",
+      description: "Return user-action instructions for granting missing recording permissions.",
+      inputSchema: PermissionsRequestInputSchema,
+      execute: async (input) => service.requestPermissions(input),
     },
     {
       name: "session_recording_start",
@@ -95,7 +111,15 @@ export function mcpOk(value: unknown): CallToolResult {
 }
 
 export function mcpError(error: unknown): CallToolResult {
-  const value = error instanceof Error
+  const value = error instanceof SporesServiceError
+    ? {
+        error: error.code,
+        message: error.message,
+        retriable: error.retriable,
+        requiresUserAction: error.requiresUserAction,
+        details: error.details,
+      }
+    : error instanceof Error
     ? { error: "internal_error", message: error.message, retriable: false, requiresUserAction: false }
     : { error: "internal_error", message: String(error), retriable: false, requiresUserAction: false };
   return {
