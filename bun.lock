@@ -18,6 +18,17 @@
         "vitest": "^4.1.10",
       },
     },
+    "apps/recorder-helper": {
+      "name": "@spores/recorder-helper",
+      "version": "0.1.0",
+      "bin": {
+        "spores-recorder-helper": "./src/index.ts",
+      },
+      "dependencies": {
+        "@spores/schema": "0.1.0",
+        "zod": "^4.4.3",
+      },
+    },
     "apps/sporesd": {
       "name": "@spores/sporesd",
       "version": "0.1.0",
@@ -157,6 +168,8 @@
     "@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.1", "", {}, "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw=="],
 
     "@spores/fake-recorder": ["@spores/fake-recorder@workspace:packages/fake-recorder"],
+
+    "@spores/recorder-helper": ["@spores/recorder-helper@workspace:apps/recorder-helper"],
 
     "@spores/schema": ["@spores/schema@workspace:packages/schema"],
 

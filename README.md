@@ -58,10 +58,31 @@ Run local diagnostics:
 ```bash
 bun run --silent spores -- doctor --json
 bun run --silent spores -- status --json
+bun run --silent spores -- targets --json
 ```
 
 Launch the MCP server over clean stdio:
 
 ```bash
 bun run --silent mcp
+```
+
+## Milestone 3
+
+The next slice adds the recorder-helper launch boundary. The helper runs as a
+separate stdio process and exposes deterministic health and target-listing
+responses while native capture is still out of scope.
+
+Run the helper directly:
+
+```bash
+bun run --silent recorder-helper
+bun run --silent recorder-helper -- --list-targets
+```
+
+Inspect helper launch through `sporesd`:
+
+```bash
+bun run --silent spores -- doctor --json
+bun run --silent spores -- targets --json
 ```

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { FakeRecorder } from "@spores/fake-recorder";
 import { SporesEventSchema, TargetRefSchema } from "@spores/schema";
 import { RunStore } from "@spores/store";
+import { createRecorderHelperClient, RecorderHelperClient } from "./recorderHelper.js";
 
 const TargetInputSchema = TargetRefSchema.partial().extend({
   mode: z.enum(["fake", "picker"]).default("fake"),
@@ -37,21 +38,31 @@ export const ArtifactInputSchema = z.object({
   artifactId: z.string(),
 });
 
+export const HelperTargetsInputSchema = z.object({});
+
 export type SporesServiceOptions = {
   rootDir?: string;
+  helper?: RecorderHelperClient;
 };
 
 export class SporesService {
   readonly store: RunStore;
   readonly recorder: FakeRecorder;
+  readonly helper: RecorderHelperClient;
 
   constructor(options: SporesServiceOptions = {}) {
     this.store = new RunStore(options.rootDir);
     this.recorder = new FakeRecorder(this.store);
+    this.helper = options.helper ?? createRecorderHelperClient();
   }
 
-  doctor() {
-    return this.recorder.doctor();
+  async doctor() {
+    const recorder = await this.recorder.doctor();
+    const helper = await this.helper.status();
+    return {
+      ...recorder,
+      helper,
+    };
   }
 
   start(input: z.infer<typeof StartRecordingInputSchema>) {
@@ -85,6 +96,10 @@ export class SporesService {
 
   artifact(input: z.infer<typeof ArtifactInputSchema>) {
     return this.store.readArtifact(input.runId, input.artifactId);
+  }
+
+  listTargets(_input: z.infer<typeof HelperTargetsInputSchema> = {}) {
+    return this.helper.listTargets();
   }
 }
 

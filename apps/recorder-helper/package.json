@@ -1,0 +1,13 @@
+{
+  "name": "@spores/recorder-helper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "spores-recorder-helper": "./src/index.ts"
+  },
+  "dependencies": {
+    "@spores/schema": "0.1.0",
+    "zod": "^4.4.3"
+  }
+}

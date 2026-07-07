@@ -90,6 +90,39 @@ export const PermissionSnapshotSchema = z.object({
   requiresUserAction: z.boolean(),
 });
 
+export const RecorderHelperStatusSchema = z.object({
+  configured: z.boolean(),
+  available: z.boolean(),
+  mode: z.enum(["stdio"]),
+  command: z.string(),
+  args: z.array(z.string()),
+  pid: z.number().int().positive().optional(),
+  version: z.string().optional(),
+  protocolVersion: z.literal(1).optional(),
+  platform: z.string().optional(),
+  targetCount: z.number().int().nonnegative().optional(),
+  capabilities: z
+    .object({
+      listTargets: z.boolean(),
+      startSession: z.boolean(),
+      stopSession: z.boolean(),
+    })
+    .optional(),
+  error: z
+    .object({
+      code: z.string(),
+      message: z.string(),
+      retriable: z.boolean(),
+      requiresUserAction: z.boolean(),
+    })
+    .optional(),
+});
+
+export const RecorderHelperTargetsSchema = z.object({
+  status: RecorderHelperStatusSchema,
+  targets: z.array(TargetRefSchema),
+});
+
 export const ClockCalibrationSchema = z.object({
   wallTime: z.string().datetime(),
   monotonicTimeNs: z.number().int().nonnegative(),
@@ -183,6 +216,8 @@ export type ArtifactRef = z.infer<typeof ArtifactRefSchema>;
 export type ClockCalibration = z.infer<typeof ClockCalibrationSchema>;
 export type FrameRef = z.infer<typeof FrameRefSchema>;
 export type PermissionSnapshot = z.infer<typeof PermissionSnapshotSchema>;
+export type RecorderHelperStatus = z.infer<typeof RecorderHelperStatusSchema>;
+export type RecorderHelperTargets = z.infer<typeof RecorderHelperTargetsSchema>;
 export type RunManifest = z.infer<typeof RunManifestSchema>;
 export type SporesError = z.infer<typeof SporesErrorSchema>;
 export type SporesEvent = z.infer<typeof SporesEventSchema>;

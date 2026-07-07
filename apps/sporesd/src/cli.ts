@@ -22,6 +22,7 @@ const HELP = `Spores CLI
 Usage:
   spores doctor [--json]
   spores status [--json] [--run-id <run-id>]
+  spores targets [--json]
   spores mcp
   spores help
 
@@ -55,6 +56,9 @@ export async function runCli(
         return 0;
       case "status":
         writeValue(io.stdout, parsed.json, await service.status({ runId: parsed.runId }), formatStatus);
+        return 0;
+      case "targets":
+        writeValue(io.stdout, parsed.json, await service.listTargets(), formatTargets);
         return 0;
       case "mcp":
         await import("./index.js");
@@ -118,8 +122,12 @@ function formatDoctor(value: Awaited<ReturnType<ReturnType<typeof createSporesSe
     `recorder: ${value.recorder}`,
     `native_capture: ${value.nativeCapture}`,
     `runs_root: ${value.rootDir}`,
+    `helper_available: ${value.helper.available}`,
+    `helper_command: ${value.helper.command} ${value.helper.args.join(" ")}`,
+    `helper_targets: ${value.helper.targetCount ?? 0}`,
+    value.helper.error ? `helper_error: ${value.helper.error.message}` : undefined,
     "",
-  ].join("\n");
+  ].filter((line) => line !== undefined).join("\n");
 }
 
 function formatStatus(value: Awaited<ReturnType<ReturnType<typeof createSporesService>["status"]>>): string {
@@ -137,6 +145,22 @@ function formatStatus(value: Awaited<ReturnType<ReturnType<typeof createSporesSe
     `frame_count: ${value.frameCount}`,
     "",
   ].join("\n");
+}
+
+function formatTargets(value: Awaited<ReturnType<ReturnType<typeof createSporesService>["listTargets"]>>): string {
+  const lines = [
+    `helper_available: ${value.status.available}`,
+    `target_count: ${value.targets.length}`,
+    ...value.targets.map((target) => {
+      const label = target.window?.title ?? target.app?.name ?? target.displayId ?? target.targetId;
+      return `${target.targetId}\t${target.kind}\t${label}`;
+    }),
+  ];
+  if (value.status.error) {
+    lines.push(`helper_error: ${value.status.error.message}`);
+  }
+  lines.push("");
+  return lines.join("\n");
 }
 
 function write(stream: Writable, value: string): void {

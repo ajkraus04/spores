@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   AppendEventInputSchema,
   ArtifactInputSchema,
+  HelperTargetsInputSchema,
   SporesService,
   StartRecordingInputSchema,
   StatusInputSchema,
@@ -25,10 +26,24 @@ export function createToolDefinitions(service: SporesService) {
   return [
     {
       name: "spores_doctor",
-      description: "Return local Spores health and fake-recorder status.",
+      description: "Return local Spores health, fake-recorder status, and recorder-helper status.",
       inputSchema: z.object({}),
       readOnly: true,
       execute: async () => service.doctor(),
+    },
+    {
+      name: "recorder_helper_status",
+      description: "Launch the recorder helper and return its availability and capability status.",
+      inputSchema: z.object({}),
+      readOnly: true,
+      execute: async () => service.helper.status(),
+    },
+    {
+      name: "recorder_helper_list_targets",
+      description: "Launch the recorder helper and return captureable displays, apps, and windows.",
+      inputSchema: HelperTargetsInputSchema,
+      readOnly: true,
+      execute: async (input) => service.listTargets(input),
     },
     {
       name: "session_recording_start",

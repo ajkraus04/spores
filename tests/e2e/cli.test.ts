@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { RunManifestSchema, SporesErrorSchema } from "@spores/schema";
+import { RecorderHelperTargetsSchema, RunManifestSchema, SporesErrorSchema } from "@spores/schema";
 import { createSporesService } from "../../apps/sporesd/src/service.js";
 
 const execFileAsync = promisify(execFile);
@@ -30,12 +30,39 @@ describe("spores CLI e2e", () => {
       recorder: "fake",
       nativeCapture: false,
       rootDir: runsRoot,
+      helper: {
+        available: true,
+        command: bunCommand(),
+        args: ["run", "--silent", "recorder-helper", "--", "--stdio"],
+        targetCount: 3,
+        capabilities: {
+          listTargets: true,
+          startSession: false,
+          stopSession: false,
+        },
+      },
     });
-    expect(JSON.parse(await runPackageScript("doctor", ["--json"], runsRoot))).toEqual(doctor);
+    expect(JSON.parse(await runPackageScript("doctor", ["--json"], runsRoot))).toMatchObject({
+      ok: true,
+      helper: { available: true, targetCount: 3 },
+    });
 
     const status = JSON.parse(await runSporesCli(["status", "--json"], runsRoot));
     expect(status).toEqual({ status: "idle" });
     expect(JSON.parse(await runPackageScript("status", ["--json"], runsRoot))).toEqual(status);
+
+    const targets = RecorderHelperTargetsSchema.parse(JSON.parse(await runSporesCli(["targets", "--json"], runsRoot)));
+    expect(targets.status).toMatchObject({ available: true, targetCount: 3 });
+    expect(targets.status).toMatchObject({
+      command: bunCommand(),
+      args: ["run", "--silent", "recorder-helper", "--", "--stdio"],
+    });
+    expect(targets.targets.map((target) => target.targetId)).toEqual([
+      "display:main",
+      "app:spores-recorder-helper",
+      "window:spores-recorder-helper:status",
+    ]);
+    expect(RecorderHelperTargetsSchema.parse(JSON.parse(await runPackageScript("targets", ["--json"], runsRoot))).targets).toHaveLength(3);
   });
 
   it("returns the latest persisted run status across CLI processes", async () => {
@@ -85,17 +112,52 @@ describe("spores CLI e2e", () => {
     });
     expect(error.message).toContain("manifest.json");
   });
+
+  it("reports helper launch failures as machine-readable degraded status", async () => {
+    const runsRoot = path.join(tempDir, "runs");
+    const env = {
+      SPORES_RUNS_ROOT: runsRoot,
+      SPORES_RECORDER_HELPER_COMMAND: path.join(tempDir, "missing-helper"),
+    };
+
+    const doctor = JSON.parse(await runSporesCli(["doctor", "--json"], runsRoot, env));
+    expect(doctor).toMatchObject({
+      ok: true,
+      helper: {
+        available: false,
+        error: {
+          code: "helper_unavailable",
+          retriable: true,
+        },
+      },
+    });
+
+    const targets = RecorderHelperTargetsSchema.parse(
+      JSON.parse(await runSporesCli(["targets", "--json"], runsRoot, env)),
+    );
+    expect(targets).toMatchObject({
+      status: {
+        available: false,
+        error: { code: "helper_unavailable" },
+      },
+      targets: [],
+    });
+  });
 });
 
-async function runSporesCli(args: string[], runsRoot: string): Promise<string> {
+async function runSporesCli(
+  args: string[],
+  runsRoot: string,
+  env: Record<string, string> = { SPORES_RUNS_ROOT: runsRoot },
+): Promise<string> {
   const { stdout } = await execFileAsync(bunCommand(), ["run", "--silent", "spores", "--", ...args], {
     cwd: repoRoot(),
-    env: childEnv({ SPORES_RUNS_ROOT: runsRoot }),
+    env: childEnv(env),
   });
   return stdout;
 }
 
-async function runPackageScript(script: "doctor" | "status", args: string[], runsRoot: string): Promise<string> {
+async function runPackageScript(script: "doctor" | "status" | "targets", args: string[], runsRoot: string): Promise<string> {
   const { stdout } = await execFileAsync(bunCommand(), ["run", "--silent", script, ...args], {
     cwd: repoRoot(),
     env: childEnv({ SPORES_RUNS_ROOT: runsRoot }),

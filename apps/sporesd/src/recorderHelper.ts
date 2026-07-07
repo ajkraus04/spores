@@ -1,0 +1,179 @@
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+
+import {
+  RecorderHelperStatus,
+  RecorderHelperStatusSchema,
+  RecorderHelperTargets,
+  RecorderHelperTargetsSchema,
+} from "@spores/schema";
+
+export type RecorderHelperConfig = {
+  command: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+};
+
+const HelperResponseSchema = z.discriminatedUnion("ok", [
+  z.object({
+    id: z.string(),
+    ok: z.literal(true),
+    result: z.unknown(),
+  }),
+  z.object({
+    id: z.string(),
+    ok: z.literal(false),
+    error: z.object({
+      code: z.string(),
+      message: z.string(),
+      retriable: z.boolean(),
+      requiresUserAction: z.boolean(),
+    }),
+  }),
+]);
+
+export class RecorderHelperClient {
+  readonly config: RecorderHelperConfig;
+
+  constructor(config: Partial<RecorderHelperConfig> = {}, env: NodeJS.ProcessEnv = process.env) {
+    this.config = {
+      command: config.command ?? env.SPORES_RECORDER_HELPER_COMMAND ?? env.SPORES_RECORDER_HELPER_CMD ?? "bun",
+      args: config.args ?? parseArgList(env.SPORES_RECORDER_HELPER_ARGS) ?? [
+        "run",
+        "--silent",
+        "recorder-helper",
+        "--",
+        "--stdio",
+      ],
+      cwd: config.cwd ?? process.cwd(),
+      env: config.env ?? env,
+      timeoutMs: config.timeoutMs ?? Number(env.SPORES_RECORDER_HELPER_TIMEOUT_MS ?? 5_000),
+    };
+  }
+
+  async status(): Promise<RecorderHelperStatus> {
+    try {
+      return this.normalizeStatus(RecorderHelperStatusSchema.parse(await this.request("doctor")));
+    } catch (error) {
+      return this.unavailableStatus(error);
+    }
+  }
+
+  async listTargets(): Promise<RecorderHelperTargets> {
+    try {
+      const response = RecorderHelperTargetsSchema.parse(await this.request("list_targets"));
+      return RecorderHelperTargetsSchema.parse({
+        ...response,
+        status: this.normalizeStatus(response.status),
+      });
+    } catch (error) {
+      return RecorderHelperTargetsSchema.parse({
+        status: this.unavailableStatus(error),
+        targets: [],
+      });
+    }
+  }
+
+  private normalizeStatus(status: RecorderHelperStatus): RecorderHelperStatus {
+    return RecorderHelperStatusSchema.parse({
+      ...status,
+      command: this.config.command,
+      args: this.config.args,
+    });
+  }
+
+  private unavailableStatus(error: unknown): RecorderHelperStatus {
+    return RecorderHelperStatusSchema.parse({
+      configured: true,
+      available: false,
+      mode: "stdio",
+      command: this.config.command,
+      args: this.config.args,
+      error: {
+        code: "helper_unavailable",
+        message: error instanceof Error ? error.message : String(error),
+        retriable: true,
+        requiresUserAction: false,
+      },
+    });
+  }
+
+  private async request(method: "doctor" | "list_targets"): Promise<unknown> {
+    const id = `helper_${randomUUID().replaceAll("-", "")}`;
+    const child = spawn(this.config.command, this.config.args, {
+      cwd: this.config.cwd,
+      env: {
+        ...process.env,
+        ...this.config.env,
+        FORCE_COLOR: "0",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+
+    const close = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        child.kill();
+        reject(new Error(`recorder helper timed out after ${this.config.timeoutMs}ms`));
+      }, this.config.timeoutMs);
+
+      child.on("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      child.on("close", (code) => {
+        clearTimeout(timeout);
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(`recorder helper exited with code ${code ?? "unknown"}${stderr ? `: ${stderr.trim()}` : ""}`));
+      });
+    });
+
+    child.stdin.end(`${JSON.stringify({ id, method })}\n`);
+    await close;
+
+    const firstLine = stdout.split("\n").find((line) => line.trim().length > 0);
+    if (!firstLine) {
+      throw new Error("recorder helper produced no response");
+    }
+
+    const response = HelperResponseSchema.parse(JSON.parse(firstLine));
+    if (response.id !== id) {
+      throw new Error(`recorder helper response id mismatch: expected ${id}, got ${response.id}`);
+    }
+    if (!response.ok) {
+      throw new Error(response.error.message);
+    }
+    return response.result;
+  }
+}
+
+export function createRecorderHelperClient(env: NodeJS.ProcessEnv = process.env) {
+  return new RecorderHelperClient({}, env);
+}
+
+function parseArgList(value: string | undefined): string[] | undefined {
+  if (!value || value.trim().length === 0) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed.startsWith("[")) {
+    return z.array(z.string()).parse(JSON.parse(trimmed));
+  }
+  return trimmed.split(/\s+/);
+}
