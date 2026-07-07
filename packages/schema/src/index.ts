@@ -81,6 +81,8 @@ export const TargetRefSchema = z.object({
   targetId: z.string(),
   kind: z.enum(["display", "window", "app", "region", "fake"]),
   displayId: z.string().optional(),
+  bounds: BoundsSchema.optional(),
+  zOrder: z.number().int().nonnegative().optional(),
   app: z
     .object({
       bundleId: z.string().optional(),

@@ -291,6 +291,13 @@ export class SporesService {
       await recoverNativeCaptureDurationMs(manifest.paths.runDir),
     ];
     const nativeArtifact = await recoverArtifact({
+      path: path.join(manifest.paths.artifactsDir, "capture.mp4"),
+      artifactIdPrefix: "art_native",
+      kind: "video",
+      mediaType: "video/mp4",
+      redactionState: "raw",
+      timeRangeMs: nativeTimeRangeMs,
+    }) ?? await recoverArtifact({
       path: path.join(manifest.paths.artifactsDir, "capture.mov"),
       artifactIdPrefix: "art_native",
       kind: "video",

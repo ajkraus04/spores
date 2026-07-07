@@ -68,11 +68,18 @@ describe("sporesd MCP stdio e2e", () => {
         "spores_doctor",
       ]);
 
-      const doctor = expectOk<{ ok: true; recorder: "helper"; nativeCapture: false; rootDir: string }>(
+      const doctor = expectOk<{
+        ok: true;
+        recorder: "helper";
+        nativeCapture: false;
+        rootDir: string;
+        helper: { available: boolean; targetCount?: number };
+      }>(
         await client.callTool({ name: "spores_doctor", arguments: {} }),
       );
       expect(doctor).toMatchObject({ ok: true, recorder: "helper", nativeCapture: false, rootDir: runsRoot });
-      expect(doctor).toMatchObject({ helper: { available: true, targetCount: 3 } });
+      expect(doctor).toMatchObject({ helper: { available: true } });
+      expect(doctor.helper.targetCount).toBeGreaterThanOrEqual(1);
 
       const helperStatus = RecorderHelperStatusSchema.parse(
         expectOk(
@@ -86,13 +93,13 @@ describe("sporesd MCP stdio e2e", () => {
         available: true,
         command: bunCommand(),
         args: ["run", "--silent", "recorder-helper", "--", "--stdio"],
-        targetCount: 3,
         capabilities: {
           listTargets: true,
           startSession: true,
           stopSession: true,
         },
       });
+      expect(helperStatus.targetCount).toBeGreaterThanOrEqual(1);
 
       const helperTargets = RecorderHelperTargetsSchema.parse(
         expectOk(
@@ -102,8 +109,16 @@ describe("sporesd MCP stdio e2e", () => {
           }),
         ),
       );
-      expect(helperTargets.status).toMatchObject({ available: true, targetCount: 3 });
-      expect(helperTargets.targets.map((target) => target.kind)).toEqual(["display", "app", "window"]);
+      expect(helperTargets.status).toMatchObject({ available: true, targetCount: helperTargets.targets.length });
+      expect(helperTargets.targets.some((target) => target.kind === "display")).toBe(true);
+      expect(helperTargets.targets.some((target) => target.kind === "window")).toBe(true);
+      expect(helperTargets.targets.find((target) => target.targetId === "display:main")).toMatchObject({
+        bounds: expect.objectContaining({ width: expect.any(Number), height: expect.any(Number) }),
+      });
+      for (const target of helperTargets.targets.filter((target) => target.kind === "window")) {
+        expect(target.window?.bounds).toBeDefined();
+        expect(target.bounds).toEqual(target.window!.bounds);
+      }
 
       const permissions = PermissionBrokerStatusSchema.parse(
         expectOk(
@@ -256,9 +271,10 @@ describe("sporesd MCP stdio e2e", () => {
     }
   }, 20_000);
 
-  itIfNativeScreenCapture("records a native screen movie through MCP stdio", async () => {
+  itIfNativeScreenCapture("records a native region screen movie through MCP stdio", async () => {
     const runId = "run_mcp_native_capture_e2e_001";
     const runsRoot = path.join(tempDir, "runs");
+    const bounds = { x: 0, y: 0, width: 320, height: 240 };
     const client = new Client({ name: "spores-native-capture-e2e-test", version: "0.1.0" });
     const transport = new StdioClientTransport({
       command: bunCommand(),
@@ -281,8 +297,8 @@ describe("sporesd MCP stdio e2e", () => {
             name: "session_recording_start",
             arguments: {
               runId,
-              purpose: "mcp native capture e2e",
-              target: { targetId: "display:main" },
+              purpose: "mcp native region capture e2e",
+              target: { targetId: "region:mcp:e2e", kind: "region", bounds },
               capture: { mode: "native", maxDurationSeconds: 1 },
             },
           }),
@@ -291,7 +307,7 @@ describe("sporesd MCP stdio e2e", () => {
       expect(started).toMatchObject({
         runId,
         status: "recording",
-        target: { kind: "display", targetId: "display:main" },
+        target: { kind: "region", targetId: "region:mcp:e2e", bounds },
       });
 
       const stopped = RunManifestSchema.parse(
@@ -308,7 +324,7 @@ describe("sporesd MCP stdio e2e", () => {
       const artifact = ArtifactRefSchema.parse(stopped.artifacts[0]);
       expect(artifact).toMatchObject({
         kind: "video",
-        mediaType: "video/quicktime",
+        mediaType: "video/mp4",
         redactionState: "raw",
       });
       const bytes = await readFile(artifact.path);
@@ -329,6 +345,9 @@ describe("sporesd MCP stdio e2e", () => {
         nativeCapture: true,
         captureBackend: "screencapture",
       });
+      const nativeState = JSON.parse(await readFile(path.join(runsRoot, runId, "native-capture.json"), "utf8"));
+      expect(nativeState).toMatchObject({ region: bounds });
+      expect(nativeState.captureArgs).toContain("-R0,0,320,240");
     } catch (error) {
       if (stderr.length > 0) {
         throw new Error(`${error instanceof Error ? error.message : String(error)}\n\nsporesd stderr:\n${stderr}`);

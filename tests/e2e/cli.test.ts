@@ -41,7 +41,6 @@ describe("spores CLI e2e", () => {
         available: true,
         command: bunCommand(),
         args: ["run", "--silent", "recorder-helper", "--", "--stdio"],
-        targetCount: 3,
         capabilities: {
           listTargets: true,
           startSession: true,
@@ -49,9 +48,10 @@ describe("spores CLI e2e", () => {
         },
       },
     });
+    expect(doctor.helper.targetCount).toBeGreaterThanOrEqual(1);
     expect(JSON.parse(await runPackageScript("doctor", ["--json"], runsRoot))).toMatchObject({
       ok: true,
-      helper: { available: true, targetCount: 3 },
+      helper: { available: true },
     });
 
     const status = JSON.parse(await runSporesCli(["status", "--json"], runsRoot));
@@ -59,17 +59,19 @@ describe("spores CLI e2e", () => {
     expect(JSON.parse(await runPackageScript("status", ["--json"], runsRoot))).toEqual(status);
 
     const targets = RecorderHelperTargetsSchema.parse(JSON.parse(await runSporesCli(["targets", "--json"], runsRoot)));
-    expect(targets.status).toMatchObject({ available: true, targetCount: 3 });
+    expect(targets.status).toMatchObject({ available: true, targetCount: targets.targets.length });
     expect(targets.status).toMatchObject({
       command: bunCommand(),
       args: ["run", "--silent", "recorder-helper", "--", "--stdio"],
     });
-    expect(targets.targets.map((target) => target.targetId)).toEqual([
-      "display:main",
-      "app:spores-recorder-helper",
-      "window:spores-recorder-helper:status",
-    ]);
-    expect(RecorderHelperTargetsSchema.parse(JSON.parse(await runPackageScript("targets", ["--json"], runsRoot))).targets).toHaveLength(3);
+    expect(targets.targets.map((target) => target.targetId)).toContain("display:main");
+    expect(targets.targets.some((target) => target.kind === "window")).toBe(true);
+    for (const target of targets.targets.filter((target) => target.kind === "window")) {
+      expect(target.bounds).toBeDefined();
+      expect(target.window?.bounds).toEqual(target.bounds);
+    }
+    const packageTargets = RecorderHelperTargetsSchema.parse(JSON.parse(await runPackageScript("targets", ["--json"], runsRoot)));
+    expect(packageTargets.targets.length).toBeGreaterThanOrEqual(1);
   }, CLI_E2E_TIMEOUT_MS);
 
   it("prints permission status and request guidance as JSON from an external CLI process", async () => {
