@@ -517,8 +517,11 @@ export async function runStdio(): Promise<number> {
 }
 
 async function handleRequest(line: string) {
+  let requestId = "unknown";
   try {
-    const request = HelperRequestSchema.parse(JSON.parse(line));
+    const rawRequest = JSON.parse(line) as unknown;
+    requestId = extractRequestId(rawRequest);
+    const request = HelperRequestSchema.parse(rawRequest);
     return {
       id: request.id,
       ok: true as const,
@@ -526,7 +529,7 @@ async function handleRequest(line: string) {
     };
   } catch (error) {
     return {
-      id: "unknown",
+      id: requestId,
       ok: false as const,
       error: {
         code: "invalid_request",
@@ -536,6 +539,16 @@ async function handleRequest(line: string) {
       },
     };
   }
+}
+
+function extractRequestId(value: unknown): string {
+  if (value && typeof value === "object" && "id" in value) {
+    const id = (value as { id: unknown }).id;
+    if (typeof id === "string") {
+      return id;
+    }
+  }
+  return "unknown";
 }
 
 async function handleParsedRequest(request: HelperRequest) {
