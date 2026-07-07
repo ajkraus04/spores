@@ -1,8 +1,12 @@
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
 import { z } from "zod";
 
 import { FakeRecorder } from "@spores/fake-recorder";
 import {
   ArtifactRef,
+  ArtifactRefSchema,
   PermissionSnapshot,
   RecorderHelperSession,
   RunManifest,
@@ -14,7 +18,7 @@ import { RunStore } from "@spores/store";
 import { createRecorderHelperClient, RecorderHelperClient, RecorderHelperSessionInput } from "./recorderHelper.js";
 
 const TargetInputSchema = TargetRefSchema.partial().extend({
-  mode: z.enum(["fake", "picker"]).default("fake"),
+  mode: z.enum(["fake", "picker"]).optional(),
 });
 
 export const StartRecordingInputSchema = z.object({
@@ -147,7 +151,7 @@ export class SporesService {
       return manifest;
     }
     if (this.activeHelperRunId !== runId) {
-      return this.recoverStaleRecording(runId);
+      return this.recoverPersistedRecording(runId);
     }
 
     const result = await this.helper.stopSession(this.toHelperSessionInput(manifest));
@@ -177,7 +181,7 @@ export class SporesService {
       return manifest;
     }
     if (this.activeHelperRunId !== runId) {
-      return this.recoverStaleRecording(runId);
+      return this.recoverPersistedRecording(runId);
     }
 
     const result = await this.helper.getSessionStatus(this.toHelperSessionInput(manifest));
@@ -199,11 +203,24 @@ export class SporesService {
     }));
   }
 
-  private async recoverStaleRecording(runId: string): Promise<RunManifest> {
+  private async recoverPersistedRecording(runId: string): Promise<RunManifest> {
     const [events, frames] = await Promise.all([
       this.store.readEvents(runId),
       this.store.readFrames(runId),
     ]);
+    const stopped = events.some((event) => event.type === "recording.stopped");
+    if (stopped) {
+      const artifacts = await this.recoverHelperArtifacts(runId);
+      return this.store.updateManifest(runId, (current) => ({
+        ...current,
+        status: "complete",
+        eventCount: events.length,
+        frameCount: frames.length,
+        artifacts: mergeArtifacts(current.artifacts, artifacts),
+        error: undefined,
+      }));
+    }
+
     return this.store.updateManifest(runId, (current) => ({
       ...current,
       status: "partial",
@@ -216,6 +233,37 @@ export class SporesService {
         requiresUserAction: false,
       },
     }));
+  }
+
+  private async recoverHelperArtifacts(runId: string): Promise<ArtifactRef[]> {
+    const manifest = await this.store.readManifest(runId);
+    const existing = manifest.artifacts.filter((artifact) => artifact.path.length > 0);
+    if (existing.length > 0) {
+      return existing;
+    }
+
+    const artifactPath = path.join(manifest.paths.artifactsDir, "helper-capture.txt");
+    const [content, artifactStat] = await Promise.all([
+      readFile(artifactPath).catch(() => undefined),
+      stat(artifactPath).catch(() => undefined),
+    ]);
+    if (!content || !artifactStat?.isFile()) {
+      return [];
+    }
+
+    return [
+      ArtifactRefSchema.parse({
+        artifactId: `art_recovered_${createHash("sha256").update(artifactPath).digest("hex").slice(0, 24)}`,
+        kind: "text",
+        path: artifactPath,
+        mediaType: "text/plain",
+        sha256: createHash("sha256").update(content).digest("hex"),
+        bytes: content.byteLength,
+        createdAt: new Date(artifactStat.mtimeMs).toISOString(),
+        timeRangeMs: [0, 1000],
+        redactionState: "not_required",
+      }),
+    ];
   }
 
   private async markRunFailed(runId: string, error: unknown): Promise<RunManifest> {
