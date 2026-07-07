@@ -23,6 +23,29 @@ afterEach(async () => {
 });
 
 describe("run bundle e2e validation", () => {
+  it("selects helper-listed target ids without requiring picker mode", async () => {
+    const runId = "run_helper_target_e2e_001";
+    const service = createSporesService({ rootDir: path.join(tempDir, "runs") });
+
+    const started = await service.start({
+      runId,
+      purpose: "validate helper target id selection",
+      target: { targetId: "display:main" },
+    });
+    await service.stop({ runId });
+
+    const manifest = RunManifestSchema.parse(JSON.parse(await readFile(service.store.pathsForRun(runId).manifest, "utf8")));
+    expect(started.target).toMatchObject({
+      targetId: "display:main",
+      kind: "display",
+      displayId: "main",
+      app: { name: "Desktop" },
+      window: { id: "desktop", title: "Main Display" },
+    });
+    expect(manifest.target).toEqual(started.target);
+    expect(manifest.target.kind).not.toBe("fake");
+  });
+
   it("persists a complete schema-valid bundle with contiguous streams and verifiable artifact bytes", async () => {
     const runId = "run_bundle_e2e_001";
     const service = createSporesService({ rootDir: path.join(tempDir, "runs") });
@@ -138,7 +161,7 @@ describe("run bundle e2e validation", () => {
     expect(artifactStat.isFile()).toBe(true);
     expect(artifact!.bytes).toBe(artifactBytes.byteLength);
     expect(artifact!.sha256).toBe(createHash("sha256").update(artifactBytes).digest("hex"));
-    expect(artifactBytes.toString("utf8")).toBe(`Spores fake capture for ${runId}\n`);
+    expect(artifactBytes.toString("utf8")).toBe(`Spores helper synthetic capture for ${runId}\n`);
   });
 });
 

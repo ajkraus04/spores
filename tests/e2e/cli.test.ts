@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -27,7 +27,7 @@ describe("spores CLI e2e", () => {
     const doctor = JSON.parse(await runSporesCli(["doctor", "--json"], runsRoot));
     expect(doctor).toMatchObject({
       ok: true,
-      recorder: "fake",
+      recorder: "helper",
       nativeCapture: false,
       rootDir: runsRoot,
       helper: {
@@ -37,8 +37,8 @@ describe("spores CLI e2e", () => {
         targetCount: 3,
         capabilities: {
           listTargets: true,
-          startSession: false,
-          stopSession: false,
+          startSession: true,
+          stopSession: true,
         },
       },
     });
@@ -111,6 +111,76 @@ describe("spores CLI e2e", () => {
       requiresUserAction: false,
     });
     expect(error.message).toContain("manifest.json");
+  });
+
+  it("recovers stale recording manifests across process boundaries", async () => {
+    const runsRoot = path.join(tempDir, "runs");
+    const service = createSporesService({ rootDir: runsRoot });
+    const started = await service.start({
+      runId: "run_stale_cli_e2e_001",
+      purpose: "stale recording recovery e2e",
+    });
+
+    expect(started).toMatchObject({ runId: "run_stale_cli_e2e_001", status: "recording" });
+
+    const recovered = RunManifestSchema.parse(
+      JSON.parse(await runSporesCli(["status", "--json", "--run-id", started.runId], runsRoot)),
+    );
+    expect(recovered).toMatchObject({
+      runId: started.runId,
+      status: "partial",
+      eventCount: 7,
+      frameCount: 1,
+      error: {
+        code: "stale_recording",
+        retriable: false,
+        requiresUserAction: false,
+      },
+    });
+
+    expect(await service.store.readManifest(started.runId)).toMatchObject({
+      status: "partial",
+      error: { code: "stale_recording" },
+    });
+  });
+
+  it("recovers completed bundles when helper stop finished before manifest sync", async () => {
+    const runsRoot = path.join(tempDir, "runs");
+    const service = createSporesService({ rootDir: runsRoot });
+    const started = await service.start({
+      runId: "run_stop_recovery_cli_e2e_001",
+      purpose: "completed recording recovery e2e",
+    });
+
+    await service.helper.stopSession({
+      runId: started.runId,
+      sessionId: started.sessionId,
+      target: started.target,
+      paths: started.paths,
+      eventCount: started.eventCount,
+      frameCount: started.frameCount,
+    });
+
+    const recovered = RunManifestSchema.parse(
+      JSON.parse(await runSporesCli(["status", "--json", "--run-id", started.runId], runsRoot)),
+    );
+
+    expect(recovered).toMatchObject({
+      runId: started.runId,
+      status: "complete",
+      eventCount: 9,
+      frameCount: 2,
+    });
+    expect(recovered.error).toBeUndefined();
+    expect(recovered.artifacts).toHaveLength(1);
+    expect(await readFile(recovered.artifacts[0]!.path, "utf8")).toBe(
+      `Spores helper synthetic capture for ${started.runId}\n`,
+    );
+    expect(await service.store.readManifest(started.runId)).toMatchObject({
+      status: "complete",
+      eventCount: 9,
+      frameCount: 2,
+    });
   });
 
   it("reports helper launch failures as machine-readable degraded status", async () => {

@@ -61,10 +61,10 @@ describe("sporesd MCP stdio e2e", () => {
         "spores_doctor",
       ]);
 
-      const doctor = expectOk<{ ok: true; recorder: "fake"; nativeCapture: false; rootDir: string }>(
+      const doctor = expectOk<{ ok: true; recorder: "helper"; nativeCapture: false; rootDir: string }>(
         await client.callTool({ name: "spores_doctor", arguments: {} }),
       );
-      expect(doctor).toMatchObject({ ok: true, recorder: "fake", nativeCapture: false, rootDir: runsRoot });
+      expect(doctor).toMatchObject({ ok: true, recorder: "helper", nativeCapture: false, rootDir: runsRoot });
       expect(doctor).toMatchObject({ helper: { available: true, targetCount: 3 } });
 
       const helperStatus = RecorderHelperStatusSchema.parse(
@@ -82,8 +82,8 @@ describe("sporesd MCP stdio e2e", () => {
         targetCount: 3,
         capabilities: {
           listTargets: true,
-          startSession: false,
-          stopSession: false,
+          startSession: true,
+          stopSession: true,
         },
       });
 
@@ -197,7 +197,7 @@ describe("sporesd MCP stdio e2e", () => {
         }),
       );
       expect(ArtifactRefSchema.parse(artifactRead.artifact)).toEqual(artifact);
-      expect(artifactRead.content).toBe(`Spores fake capture for ${runId}\n`);
+      expect(artifactRead.content).toBe(`Spores helper synthetic capture for ${runId}\n`);
 
       const manifestStat = await stat(path.join(runsRoot, runId, "manifest.json"));
       expect(manifestStat.isFile()).toBe(true);

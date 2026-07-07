@@ -1,12 +1,24 @@
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
 import { z } from "zod";
 
 import { FakeRecorder } from "@spores/fake-recorder";
-import { SporesEventSchema, TargetRefSchema } from "@spores/schema";
+import {
+  ArtifactRef,
+  ArtifactRefSchema,
+  PermissionSnapshot,
+  RecorderHelperSession,
+  RunManifest,
+  SporesEventSchema,
+  TargetRef,
+  TargetRefSchema,
+} from "@spores/schema";
 import { RunStore } from "@spores/store";
-import { createRecorderHelperClient, RecorderHelperClient } from "./recorderHelper.js";
+import { createRecorderHelperClient, RecorderHelperClient, RecorderHelperSessionInput } from "./recorderHelper.js";
 
 const TargetInputSchema = TargetRefSchema.partial().extend({
-  mode: z.enum(["fake", "picker"]).default("fake"),
+  mode: z.enum(["fake", "picker"]).optional(),
 });
 
 export const StartRecordingInputSchema = z.object({
@@ -40,20 +52,26 @@ export const ArtifactInputSchema = z.object({
 
 export const HelperTargetsInputSchema = z.object({});
 
+export type RecorderBackend = "helper" | "fake";
+
 export type SporesServiceOptions = {
   rootDir?: string;
   helper?: RecorderHelperClient;
+  backend?: RecorderBackend;
 };
 
 export class SporesService {
   readonly store: RunStore;
   readonly recorder: FakeRecorder;
   readonly helper: RecorderHelperClient;
+  readonly backend: RecorderBackend;
+  private activeHelperRunId: string | undefined;
 
   constructor(options: SporesServiceOptions = {}) {
     this.store = new RunStore(options.rootDir);
     this.recorder = new FakeRecorder(this.store);
     this.helper = options.helper ?? createRecorderHelperClient();
+    this.backend = options.backend ?? parseRecorderBackend(process.env.SPORES_RECORDER_BACKEND);
   }
 
   async doctor() {
@@ -61,29 +79,84 @@ export class SporesService {
     const helper = await this.helper.status();
     return {
       ...recorder,
+      recorder: this.backend,
       helper,
     };
   }
 
-  start(input: z.infer<typeof StartRecordingInputSchema>) {
-    return this.recorder.start(input);
+  async start(input: z.infer<typeof StartRecordingInputSchema>) {
+    if (this.backend === "fake") {
+      return this.recorder.start(input);
+    }
+
+    const target = await this.resolveHelperTarget(input.target);
+    const manifest = await this.store.createRun({
+      runId: input.runId,
+      target,
+      permissionSnapshot: helperPermissionSnapshot(),
+    });
+
+    try {
+      const result = await this.helper.startSession(this.toHelperSessionInput(manifest, input.purpose));
+      this.activeHelperRunId = manifest.runId;
+      return this.syncManifestFromBundle(manifest.runId, result);
+    } catch (error) {
+      await this.markRunFailed(manifest.runId, error);
+      throw error;
+    }
   }
 
   async status(input: z.infer<typeof StatusInputSchema>) {
+    if (this.backend === "fake") {
+      if (input.runId) {
+        return this.store.readManifest(input.runId);
+      }
+      const active = await this.recorder.status();
+      if (active.status !== "idle") {
+        return active;
+      }
+      return (await this.store.readLatestManifest()) ?? active;
+    }
+
     if (input.runId) {
-      return this.store.readManifest(input.runId);
+      return this.readRecoverableManifest(input.runId);
     }
 
-    const active = await this.recorder.status();
-    if (active.status !== "idle") {
-      return active;
+    if (this.activeHelperRunId) {
+      return this.readRecoverableManifest(this.activeHelperRunId);
     }
 
-    return (await this.store.readLatestManifest()) ?? active;
+    const latest = await this.store.readLatestManifest();
+    if (!latest) {
+      return { status: "idle" as const };
+    }
+    return this.readRecoverableManifest(latest.runId);
   }
 
-  stop(input: z.infer<typeof StopInputSchema>) {
-    return this.recorder.stop(input.runId);
+  async stop(input: z.infer<typeof StopInputSchema>) {
+    if (this.backend === "fake") {
+      return this.recorder.stop(input.runId);
+    }
+
+    const runId = input.runId ?? this.activeHelperRunId;
+    if (!runId) {
+      throw new Error("no active recording");
+    }
+
+    const manifest = await this.store.readManifest(runId);
+    if (manifest.status === "complete" || manifest.status === "stopped") {
+      return manifest;
+    }
+    if (manifest.status !== "recording") {
+      return manifest;
+    }
+    if (this.activeHelperRunId !== runId) {
+      return this.recoverPersistedRecording(runId);
+    }
+
+    const result = await this.helper.stopSession(this.toHelperSessionInput(manifest));
+    this.activeHelperRunId = undefined;
+    return this.syncManifestFromBundle(runId, result);
   }
 
   appendEvent(input: z.infer<typeof AppendEventInputSchema>) {
@@ -101,8 +174,198 @@ export class SporesService {
   listTargets(_input: z.infer<typeof HelperTargetsInputSchema> = {}) {
     return this.helper.listTargets();
   }
+
+  private async readRecoverableManifest(runId: string): Promise<RunManifest> {
+    const manifest = await this.store.readManifest(runId);
+    if (manifest.status !== "recording") {
+      return manifest;
+    }
+    if (this.activeHelperRunId !== runId) {
+      return this.recoverPersistedRecording(runId);
+    }
+
+    const result = await this.helper.getSessionStatus(this.toHelperSessionInput(manifest));
+    return this.syncManifestFromBundle(runId, result);
+  }
+
+  private async syncManifestFromBundle(runId: string, result: RecorderHelperSession): Promise<RunManifest> {
+    const [events, frames] = await Promise.all([
+      this.store.readEvents(runId),
+      this.store.readFrames(runId),
+    ]);
+    return this.store.updateManifest(runId, (current) => ({
+      ...current,
+      status: result.status,
+      eventCount: events.length,
+      frameCount: frames.length,
+      artifacts: mergeArtifacts(current.artifacts, result.artifacts),
+      error: undefined,
+    }));
+  }
+
+  private async recoverPersistedRecording(runId: string): Promise<RunManifest> {
+    const [events, frames] = await Promise.all([
+      this.store.readEvents(runId),
+      this.store.readFrames(runId),
+    ]);
+    const stopped = events.some((event) => event.type === "recording.stopped");
+    if (stopped) {
+      const artifacts = await this.recoverHelperArtifacts(runId);
+      return this.store.updateManifest(runId, (current) => ({
+        ...current,
+        status: "complete",
+        eventCount: events.length,
+        frameCount: frames.length,
+        artifacts: mergeArtifacts(current.artifacts, artifacts),
+        error: undefined,
+      }));
+    }
+
+    return this.store.updateManifest(runId, (current) => ({
+      ...current,
+      status: "partial",
+      eventCount: events.length,
+      frameCount: frames.length,
+      error: {
+        code: "stale_recording",
+        message: "Recording was left active without a live helper session and was marked partial.",
+        retriable: false,
+        requiresUserAction: false,
+      },
+    }));
+  }
+
+  private async recoverHelperArtifacts(runId: string): Promise<ArtifactRef[]> {
+    const manifest = await this.store.readManifest(runId);
+    const existing = manifest.artifacts.filter((artifact) => artifact.path.length > 0);
+    if (existing.length > 0) {
+      return existing;
+    }
+
+    const artifactPath = path.join(manifest.paths.artifactsDir, "helper-capture.txt");
+    const [content, artifactStat] = await Promise.all([
+      readFile(artifactPath).catch(() => undefined),
+      stat(artifactPath).catch(() => undefined),
+    ]);
+    if (!content || !artifactStat?.isFile()) {
+      return [];
+    }
+
+    return [
+      ArtifactRefSchema.parse({
+        artifactId: `art_recovered_${createHash("sha256").update(artifactPath).digest("hex").slice(0, 24)}`,
+        kind: "text",
+        path: artifactPath,
+        mediaType: "text/plain",
+        sha256: createHash("sha256").update(content).digest("hex"),
+        bytes: content.byteLength,
+        createdAt: new Date(artifactStat.mtimeMs).toISOString(),
+        timeRangeMs: [0, 1000],
+        redactionState: "not_required",
+      }),
+    ];
+  }
+
+  private async markRunFailed(runId: string, error: unknown): Promise<RunManifest> {
+    return this.store.updateManifest(runId, (current) => ({
+      ...current,
+      status: "failed",
+      error: {
+        code: "helper_start_failed",
+        message: error instanceof Error ? error.message : String(error),
+        retriable: true,
+        requiresUserAction: false,
+      },
+    }));
+  }
+
+  private async resolveHelperTarget(target?: z.infer<typeof TargetInputSchema>): Promise<TargetRef> {
+    if (target?.mode === "fake" || target?.kind === "fake") {
+      return TargetRefSchema.parse({
+        targetId: target.targetId ?? "target:helper-synthetic",
+        kind: "fake",
+        displayId: target.displayId ?? "helper-display",
+        app: target.app ?? {
+          name: "Spores Helper Synthetic App",
+          bundleId: "dev.spores.helper.synthetic",
+        },
+        window: target.window ?? {
+          id: "helper-synthetic-window",
+          title: "Spores Helper Synthetic Recording",
+          bounds: { x: 0, y: 0, width: 1280, height: 720 },
+        },
+        safeToPersist: target.safeToPersist ?? true,
+      });
+    }
+
+    const targets = await this.helper.listTargets();
+    const selected = targets.targets.find((candidate) => candidate.targetId === target?.targetId) ?? targets.targets[0];
+    if (!selected) {
+      throw new Error("recorder helper returned no capture targets");
+    }
+
+    return TargetRefSchema.parse({
+      ...selected,
+      ...stripTargetMode(target),
+      targetId: target?.targetId ?? selected.targetId,
+      kind: target?.kind ?? selected.kind,
+      app: target?.app ?? selected.app,
+      window: target?.window ?? selected.window,
+      safeToPersist: target?.safeToPersist ?? selected.safeToPersist,
+    });
+  }
+
+  private toHelperSessionInput(manifest: RunManifest, purpose?: string): RecorderHelperSessionInput {
+    return {
+      runId: manifest.runId,
+      sessionId: manifest.sessionId,
+      target: manifest.target,
+      paths: manifest.paths,
+      purpose,
+      eventCount: manifest.eventCount,
+      frameCount: manifest.frameCount,
+    };
+  }
 }
 
 export function createSporesService(options: SporesServiceOptions = {}) {
   return new SporesService(options);
+}
+
+function parseRecorderBackend(value: string | undefined): RecorderBackend {
+  return value === "fake" ? "fake" : "helper";
+}
+
+function stripTargetMode(target: z.infer<typeof TargetInputSchema> | undefined): Partial<TargetRef> {
+  if (!target) {
+    return {};
+  }
+  const { mode: _mode, ...rest } = target;
+  return rest;
+}
+
+function mergeArtifacts(existing: ArtifactRef[], incoming: ArtifactRef[]): ArtifactRef[] {
+  const seen = new Set(existing.map((artifact) => artifact.artifactId));
+  return [
+    ...existing,
+    ...incoming.filter((artifact) => {
+      if (seen.has(artifact.artifactId)) {
+        return false;
+      }
+      seen.add(artifact.artifactId);
+      return true;
+    }),
+  ];
+}
+
+function helperPermissionSnapshot(): PermissionSnapshot {
+  return {
+    platform: process.platform,
+    screenRecording: "granted",
+    accessibility: "granted",
+    inputMonitoring: "not_requested",
+    microphone: "not_requested",
+    systemAudio: "not_requested",
+    requiresUserAction: false,
+  };
 }

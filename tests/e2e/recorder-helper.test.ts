@@ -1,9 +1,17 @@
 import { execFile, spawn } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { once } from "node:events";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
-import { RecorderHelperStatusSchema, RecorderHelperTargetsSchema } from "@spores/schema";
+import {
+  RecorderHelperSessionSchema,
+  RecorderHelperStatusSchema,
+  RecorderHelperTargetsSchema,
+  TargetRefSchema,
+} from "@spores/schema";
 
 const execFileAsync = promisify(execFile);
 
@@ -17,8 +25,8 @@ describe("recorder helper process e2e", () => {
       targetCount: 3,
       capabilities: {
         listTargets: true,
-        startSession: false,
-        stopSession: false,
+        startSession: true,
+        stopSession: true,
       },
     });
 
@@ -45,6 +53,77 @@ describe("recorder helper process e2e", () => {
     expect(targets.targets).toHaveLength(3);
     expect(targets.targets.map((target) => target.kind)).toEqual(["display", "app", "window"]);
   });
+
+  it("writes lifecycle events, frames, and artifacts over stdio", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "spores-helper-lifecycle-"));
+    try {
+      const paths = {
+        runDir: path.join(tempDir, "run_helper_lifecycle_001"),
+        manifest: path.join(tempDir, "run_helper_lifecycle_001", "manifest.json"),
+        events: path.join(tempDir, "run_helper_lifecycle_001", "events.ndjson"),
+        frames: path.join(tempDir, "run_helper_lifecycle_001", "frames.ndjson"),
+        artifactsDir: path.join(tempDir, "run_helper_lifecycle_001", "artifacts"),
+      };
+      await mkdir(paths.artifactsDir, { recursive: true });
+      const params = {
+        runId: "run_helper_lifecycle_001",
+        sessionId: "sess_helper_lifecycle_001",
+        target: TargetRefSchema.parse({
+          targetId: "display:main",
+          kind: "display",
+          displayId: "main",
+          safeToPersist: true,
+        }),
+        paths,
+        purpose: "helper lifecycle e2e",
+        eventCount: 0,
+        frameCount: 0,
+      };
+
+      const started = RecorderHelperSessionSchema.parse(
+        await sendStdioRequest({ id: "req_start", method: "start_session", params }),
+      );
+      expect(started).toMatchObject({ status: "recording", eventCount: 7, frameCount: 1, artifacts: [] });
+
+      const recording = RecorderHelperSessionSchema.parse(
+        await sendStdioRequest({
+          id: "req_status",
+          method: "get_status",
+          params: { ...params, eventCount: started.eventCount, frameCount: started.frameCount },
+        }),
+      );
+      expect(recording).toMatchObject({ status: "recording", eventCount: 7, frameCount: 1 });
+
+      const stopped = RecorderHelperSessionSchema.parse(
+        await sendStdioRequest({
+          id: "req_stop",
+          method: "stop_session",
+          params: { ...params, eventCount: started.eventCount, frameCount: started.frameCount },
+        }),
+      );
+      expect(stopped).toMatchObject({ status: "complete", eventCount: 9, frameCount: 2 });
+      expect(stopped.artifacts).toHaveLength(1);
+
+      const events = (await readFile(paths.events, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      const frames = (await readFile(paths.frames, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      expect(events.map((event) => event.type)).toEqual([
+        "permission.snapshot",
+        "recording.started",
+        "target.selected",
+        "app.focused",
+        "window.changed",
+        "accessibility.tree",
+        "screen.frame",
+        "screen.frame",
+        "recording.stopped",
+      ]);
+      expect(events.map((event) => event.sequence)).toEqual([...Array(9).keys()]);
+      expect(frames.map((frame) => frame.sequence)).toEqual([0, 1]);
+      expect(await readFile(stopped.artifacts[0]!.path, "utf8")).toBe("Spores helper synthetic capture for run_helper_lifecycle_001\n");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 async function runHelperScript(args: string[]): Promise<string> {
@@ -55,7 +134,7 @@ async function runHelperScript(args: string[]): Promise<string> {
   return stdout;
 }
 
-async function sendStdioRequest(request: { id: string; method: string }): Promise<unknown> {
+async function sendStdioRequest(request: { id: string; method: string; params?: unknown }): Promise<unknown> {
   const child = spawn(bunCommand(), ["run", "--silent", "recorder-helper", "--", "--stdio"], {
     cwd: repoRoot(),
     env: childEnv(),

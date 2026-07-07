@@ -149,6 +149,15 @@ export const FrameRefSchema = z.object({
   artifactId: z.string().optional(),
 });
 
+export const RecorderHelperSessionSchema = z.object({
+  runId: z.string(),
+  sessionId: z.string(),
+  status: RecordingStatusSchema,
+  eventCount: z.number().int().nonnegative(),
+  frameCount: z.number().int().nonnegative(),
+  artifacts: z.array(ArtifactRefSchema).default([]),
+});
+
 export const SporesEventSchema = z.object({
   schemaVersion: z.literal(1),
   eventId: z.string(),
@@ -218,6 +227,7 @@ export type FrameRef = z.infer<typeof FrameRefSchema>;
 export type PermissionSnapshot = z.infer<typeof PermissionSnapshotSchema>;
 export type RecorderHelperStatus = z.infer<typeof RecorderHelperStatusSchema>;
 export type RecorderHelperTargets = z.infer<typeof RecorderHelperTargetsSchema>;
+export type RecorderHelperSession = z.infer<typeof RecorderHelperSessionSchema>;
 export type RunManifest = z.infer<typeof RunManifestSchema>;
 export type SporesError = z.infer<typeof SporesErrorSchema>;
 export type SporesEvent = z.infer<typeof SporesEventSchema>;
