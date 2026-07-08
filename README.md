@@ -62,15 +62,15 @@ Use the installable package when an agent or MCP client should start Spores
 without a local checkout:
 
 ```bash
-npx spores setup --json
-bunx spores setup --json
+npx @ajkraus04/spores setup --json
+bunx @ajkraus04/spores setup --json
 ```
 
 Start the MCP server from the package:
 
 ```bash
-npx --yes spores mcp
-bunx spores mcp
+npx --yes @ajkraus04/spores mcp
+bunx @ajkraus04/spores mcp
 ```
 
 Recommended MCP server config using `npx`:
@@ -80,7 +80,7 @@ Recommended MCP server config using `npx`:
   "mcpServers": {
     "spores": {
       "command": "npx",
-      "args": ["--yes", "spores", "mcp"]
+      "args": ["--yes", "@ajkraus04/spores", "mcp"]
     }
   }
 }
@@ -93,7 +93,7 @@ Equivalent config using `bunx`:
   "mcpServers": {
     "spores": {
       "command": "bunx",
-      "args": ["spores", "mcp"]
+      "args": ["@ajkraus04/spores", "mcp"]
     }
   }
 }
@@ -118,7 +118,9 @@ spores-recorder-helper
 ```
 
 `npx spores@setup` is not the intended interface. That would require a mutable
-npm dist-tag named `setup`; use the stable `spores setup` subcommand instead.
+npm dist-tag named `setup`; use the stable `@ajkraus04/spores setup`
+subcommand instead. The unscoped package name `spores` is blocked by npm's
+similar-name protection for the existing `Spores` package.
 
 ## Source Checkout
 

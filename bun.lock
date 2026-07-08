@@ -52,12 +52,12 @@
       },
     },
     "packages/npm": {
-      "name": "spores",
+      "name": "@ajkraus04/spores",
       "version": "0.1.0",
       "bin": {
-        "spores": "./dist/spores.js",
-        "sporesd": "./dist/sporesd.js",
-        "spores-recorder-helper": "./dist/spores-recorder-helper.js",
+        "spores": "dist/spores.js",
+        "sporesd": "dist/sporesd.js",
+        "spores-recorder-helper": "dist/spores-recorder-helper.js",
       },
     },
     "packages/schema": {
@@ -76,6 +76,8 @@
     },
   },
   "packages": {
+    "@ajkraus04/spores": ["@ajkraus04/spores@workspace:packages/npm"],
+
     "@emnapi/core": ["@emnapi/core@1.11.1", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.2", "tslib": "^2.4.0" } }, "sha512-RSvbQmHzdKzNsLYa/wHrbc3KN4sYLKAdPZxqiM2HATqv/SBk2/ENSHpvXGaLOMcsAyz0poEGqkmmKYG3OWiJEQ=="],
 
     "@emnapi/runtime": ["@emnapi/runtime@1.11.1", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-vgj7R3y3Wgx24IQaGPA/R6YFXLHVMOZ0uVEyIQPaWs+rd1AzfEMXlAC22FYwO1XkKR6NPsq7mUandH8oIRdZFw=="],
@@ -435,8 +437,6 @@
     "siginfo": ["siginfo@2.0.0", "", {}, "sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g=="],
 
     "source-map-js": ["source-map-js@1.2.1", "", {}, "sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA=="],
-
-    "spores": ["spores@workspace:packages/npm"],
 
     "stackback": ["stackback@0.0.2", "", {}, "sha512-1XMJE5fQo1jGH6Y/7ebnwPOBEkIEnT4QF32d5R1+VXdXveM0IBMJt8zfaxX1P3QhVwrYe+576+jkANtSS2mBbw=="],
 

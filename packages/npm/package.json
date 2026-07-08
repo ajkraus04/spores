@@ -1,5 +1,5 @@
 {
-  "name": "spores",
+  "name": "@ajkraus04/spores",
   "version": "0.1.0",
   "description": "MCP-first desktop recording for agents.",
   "type": "module",

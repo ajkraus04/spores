@@ -31,7 +31,7 @@ describe("installable spores package e2e", () => {
       helper: { available: true },
       permissions: { requiresUserAction: false },
     });
-    expect(npxSetup.helper.args[0]).toContain("node_modules/spores/dist/spores-recorder-helper.js");
+    expect(npxSetup.helper.args[0]).toMatch(/node_modules\/(?:@ajkraus04\/)?spores\/dist\/spores-recorder-helper\.js$/);
     expect(npxSetup.recommendedTools).toContain("session_recording_capture");
 
     const bunxSetup = await runSetupVia("bunx", tarball, path.join(tempDir, "bunx-runs"));
@@ -41,7 +41,7 @@ describe("installable spores package e2e", () => {
       helper: { available: true },
       permissions: { requiresUserAction: false },
     });
-    expect(bunxSetup.helper.args[0]).toContain("node_modules/spores/dist/spores-recorder-helper.js");
+    expect(bunxSetup.helper.args[0]).toMatch(/node_modules\/(?:@ajkraus04\/)?spores\/dist\/spores-recorder-helper\.js$/);
     expect(bunxSetup.recommendedTools).toContain("session_recording_capture");
   }, PACKAGE_INSTALL_TIMEOUT_MS);
 
@@ -80,7 +80,7 @@ describe("installable spores package e2e", () => {
       }>(await client.callTool({ name: "recorder_ready", arguments: {} }));
       expect(ready.ready).toBe(true);
       expect(ready.helper.available).toBe(true);
-      expect(ready.helper.args[0]).toContain("node_modules/spores/dist/spores-recorder-helper.js");
+      expect(ready.helper.args[0]).toMatch(/node_modules\/(?:@ajkraus04\/)?spores\/dist\/spores-recorder-helper\.js$/);
       expect(ready.recommendedTools).toContain("session_recording_capture");
     } finally {
       await client.close().catch(() => undefined);
