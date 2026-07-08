@@ -4,9 +4,9 @@
   "description": "MCP-first desktop recording for agents.",
   "type": "module",
   "bin": {
-    "spores": "./dist/spores.js",
-    "sporesd": "./dist/sporesd.js",
-    "spores-recorder-helper": "./dist/spores-recorder-helper.js"
+    "spores": "dist/spores.js",
+    "sporesd": "dist/sporesd.js",
+    "spores-recorder-helper": "dist/spores-recorder-helper.js"
   },
   "files": [
     "dist",
