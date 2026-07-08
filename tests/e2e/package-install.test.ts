@@ -27,6 +27,7 @@ describe("installable spores package e2e", () => {
     expect(packed.files.map((file) => file.path)).toEqual(expect.arrayContaining([
       "assets/recording-backgrounds/hypha-dark.png",
       "assets/recording-backgrounds/manifest.json",
+      ...(process.platform === "darwin" ? ["dist/spores-video-compositor-macos"] : []),
     ]));
   }, PACKAGE_INSTALL_TIMEOUT_MS);
 

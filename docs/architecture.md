@@ -88,6 +88,7 @@ Every recording creates a run bundle:
   frames.ndjson
   artifacts/
     capture.mp4
+    source-capture.mp4
     screenshots/
     snapshots/
     accessibility/

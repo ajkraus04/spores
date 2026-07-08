@@ -1005,7 +1005,7 @@ export class SporesService {
     const artifacts = input.verifyArtifacts
       ? await Promise.all(manifest.artifacts.map((artifact) => verifyArtifact(artifact)))
       : manifest.artifacts.map((artifact) => ({ artifact, verified: undefined }));
-    const primaryArtifact = manifest.artifacts.find((artifact) => artifact.kind === "video") ?? manifest.artifacts[0];
+    const primaryArtifact = primaryRecordingArtifact(manifest.artifacts);
     const filteredEvents = input.eventTypes
       ? timeline.events.filter((event) => input.eventTypes!.includes(event.type))
       : timeline.events;
@@ -1103,7 +1103,7 @@ export class SporesService {
     });
     const stopped = await this.stop({ runId: started.runId });
     const timeline = await this.timeline({ runId: started.runId });
-    const artifact = stopped.artifacts.find((candidate) => candidate.kind === "video") ?? stopped.artifacts[0];
+    const artifact = primaryRecordingArtifact(stopped.artifacts);
 
     return {
       runId: stopped.runId,
@@ -1259,6 +1259,17 @@ export class SporesService {
       artifactIdPrefix: "art_native",
       kind: "video",
       mediaType: "video/mp4",
+      role: "recording_primary",
+      label: "Composited recording",
+      redactionState: "raw",
+      timeRangeMs: nativeTimeRangeMs,
+    }) ?? await recoverArtifact({
+      path: path.join(manifest.paths.artifactsDir, "source-capture.mp4"),
+      artifactIdPrefix: "art_native_source",
+      kind: "video",
+      mediaType: "video/mp4",
+      role: "source_capture",
+      label: "Source screen capture",
       redactionState: "raw",
       timeRangeMs: nativeTimeRangeMs,
     }) ?? await recoverArtifact({
@@ -1266,6 +1277,8 @@ export class SporesService {
       artifactIdPrefix: "art_native",
       kind: "video",
       mediaType: "video/quicktime",
+      role: "source_capture",
+      label: "Source screen capture",
       redactionState: "raw",
       timeRangeMs: nativeTimeRangeMs,
     });
@@ -1625,6 +1638,8 @@ async function recoverArtifact(input: {
   artifactIdPrefix: string;
   kind: ArtifactRef["kind"];
   mediaType: string;
+  role?: string;
+  label?: string;
   redactionState: ArtifactRef["redactionState"];
   timeRangeMs: [number, number];
 }): Promise<ArtifactRef | undefined> {
@@ -1640,6 +1655,8 @@ async function recoverArtifact(input: {
     kind: input.kind,
     path: artifactPath,
     relativePath: path.basename(artifactPath),
+    role: input.role,
+    label: input.label,
     streamable: input.kind === "video",
     seekable: input.kind === "video",
     durationMs: input.timeRangeMs[1] - input.timeRangeMs[0],
@@ -1688,6 +1705,12 @@ function mergeArtifacts(existing: ArtifactRef[], incoming: ArtifactRef[]): Artif
       return true;
     }),
   ];
+}
+
+function primaryRecordingArtifact(artifacts: ArtifactRef[]): ArtifactRef | undefined {
+  return artifacts.find((artifact) => artifact.role === "recording_primary")
+    ?? artifacts.find((artifact) => artifact.kind === "video")
+    ?? artifacts[0];
 }
 
 function readinessReasonCodes(input: {

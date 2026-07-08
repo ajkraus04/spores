@@ -41,14 +41,17 @@ Current runs are written under `SPORES_RUNS_ROOT` or `.spores/runs`:
   events.ndjson
   frames.ndjson
   artifacts/
-    capture.mp4          # native sessions
+    capture.mp4          # composed native sessions
+    source-capture.mp4   # raw native source capture
     helper-capture.txt   # synthetic sessions
   native-capture.json    # native sessions
 ```
 
-`capture.mp4` is present for native macOS recordings. `helper-capture.txt` is
-used by synthetic/helper tests. `native-capture.json` records the macOS
-`screencapture` state needed for recovery and debugging.
+`capture.mp4` is the primary agent-facing MP4 for native macOS recordings and
+is composed over the bundled recording background. `source-capture.mp4` retains
+the raw `screencapture` output when present. `helper-capture.txt` is used by
+synthetic/helper tests. `native-capture.json` records the macOS `screencapture`
+state needed for recovery and debugging.
 
 ## Planned Indexed Layout
 
@@ -83,6 +86,7 @@ contract:
       "artifactId": "art_native_abc",
       "kind": "video",
       "path": ".spores/runs/run_123/artifacts/capture.mp4",
+      "role": "recording_primary",
       "mediaType": "video/mp4",
       "sha256": "...",
       "bytes": 102400,

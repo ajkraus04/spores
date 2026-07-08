@@ -179,6 +179,14 @@ describe("run bundle e2e validation", () => {
     const artifact = manifest.artifacts[0];
     expect(artifact).toMatchObject({
       kind: "video",
+      role: "recording_primary",
+      mediaType: "video/mp4",
+      redactionState: "raw",
+      timeRangeMs: [0, 1000],
+    });
+    const sourceArtifact = manifest.artifacts.find((candidate) => candidate.role === "source_capture");
+    expect(sourceArtifact).toMatchObject({
+      kind: "video",
       mediaType: "video/mp4",
       redactionState: "raw",
       timeRangeMs: [0, 1000],
@@ -193,11 +201,16 @@ describe("run bundle e2e validation", () => {
     expect(artifactBytes.byteLength).toBeGreaterThan(1024);
     expect(artifact!.bytes).toBe(artifactBytes.byteLength);
     expect(artifact!.sha256).toBe(createHash("sha256").update(artifactBytes).digest("hex"));
+    expect(path.basename(sourceArtifact!.path)).toBe("source-capture.mp4");
+    expect(sourceArtifact!.sha256).not.toBe(artifact!.sha256);
 
     const nativeState = JSON.parse(await readFile(path.join(paths.runDir, "native-capture.json"), "utf8"));
     expect(nativeState).toMatchObject({
       mode: "native",
       outputPath: artifact!.path,
+      sourceOutputPath: sourceArtifact!.path,
+      backgroundId: "hypha-dark",
+      backgroundSafeArea: { x: 0.07, y: 0.09, width: 0.86, height: 0.8 },
       maxDurationSeconds: 1,
     });
   }, 20_000);
@@ -227,11 +240,18 @@ describe("run bundle e2e validation", () => {
     expect(stopped).toMatchObject({ runId, status: "complete", eventCount: 9, frameCount: 2 });
     expect(stopped.artifacts[0]).toMatchObject({
       kind: "video",
+      role: "recording_primary",
       mediaType: "video/mp4",
       redactionState: "raw",
     });
 
     const artifact = stopped.artifacts[0]!;
+    const sourceArtifact = stopped.artifacts.find((candidate) => candidate.role === "source_capture");
+    expect(sourceArtifact).toMatchObject({
+      kind: "video",
+      mediaType: "video/mp4",
+      relativePath: "source-capture.mp4",
+    });
     const bytes = await readFile(artifact.path);
     expect(bytes.byteLength).toBeGreaterThan(1024);
     expect(artifact.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
@@ -240,6 +260,7 @@ describe("run bundle e2e validation", () => {
     expect(nativeState).toMatchObject({
       mode: "native",
       outputPath: artifact.path,
+      sourceOutputPath: sourceArtifact!.path,
       region: bounds,
     });
     expect(nativeState.captureArgs).toContain("-R0,0,320,240");
@@ -287,8 +308,14 @@ describe("run bundle e2e validation", () => {
     const artifact = stopped.artifacts[0]!;
     expect(artifact).toMatchObject({
       kind: "video",
+      role: "recording_primary",
       mediaType: "video/mp4",
       redactionState: "raw",
+    });
+    expect(stopped.artifacts.find((candidate) => candidate.role === "source_capture")).toMatchObject({
+      kind: "video",
+      mediaType: "video/mp4",
+      relativePath: "source-capture.mp4",
     });
     const bytes = await readFile(artifact.path);
     expect(bytes.byteLength).toBeGreaterThan(1024);

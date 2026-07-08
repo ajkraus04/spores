@@ -2,7 +2,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -32,6 +32,13 @@ import {
 
 const VERSION = "0.1.0";
 const PROTOCOL_VERSION = 1;
+const DEFAULT_BACKGROUND_ID = "hypha-dark";
+const DEFAULT_BACKGROUND_SAFE_AREA = {
+  x: 0.07,
+  y: 0.09,
+  width: 0.86,
+  height: 0.8,
+} as const;
 const MACOS_TARGET_SNAPSHOT_SCRIPT = String.raw`
 import AppKit
 import CoreGraphics
@@ -223,13 +230,42 @@ const NativeCaptureStateSchema = z.object({
   mode: z.literal("native"),
   pid: z.number().int().positive(),
   outputPath: z.string(),
+  sourceOutputPath: z.string().optional(),
   startedAt: z.string().datetime(),
   expectedStopAt: z.string().datetime(),
   maxDurationSeconds: z.number().int().positive(),
+  backgroundId: z.string().optional(),
+  backgroundPath: z.string().optional(),
+  backgroundSafeArea: z.object({
+    x: z.number(),
+    y: z.number(),
+    width: z.number(),
+    height: z.number(),
+  }).optional(),
   displayNumber: z.number().int().positive().optional(),
   windowId: z.string().optional(),
   region: BoundsSchema.optional(),
   captureArgs: z.array(z.string()).optional(),
+});
+
+const RecordingBackgroundManifestSchema = z.object({
+  version: z.number().int().positive(),
+  backgrounds: z.array(z.object({
+    id: z.string(),
+    theme: z.string().optional(),
+    file: z.string(),
+    mediaType: z.string(),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    sha256: z.string(),
+    purpose: z.string().optional(),
+    safeArea: z.object({
+      x: z.number(),
+      y: z.number(),
+      width: z.number(),
+      height: z.number(),
+    }).optional(),
+  })),
 });
 
 const MacOSDisplayTargetSchema = z.object({
@@ -653,6 +689,7 @@ async function startSession(params: z.infer<typeof SessionParamsSchema>) {
       captureBackend: nativeCapture ? "screencapture" : "synthetic",
       maxDurationSeconds: params.capture.maxDurationSeconds,
       artifactPath: nativeState?.outputPath,
+      sourceArtifactPath: nativeState?.sourceOutputPath,
     }),
     createEvent(params, params.eventCount + 2, "target.selected", { target: params.target }),
     createEvent(params, params.eventCount + 3, "app.focused", {
@@ -810,13 +847,15 @@ async function startNativeCapture(params: z.infer<typeof SessionParamsSchema>) {
   }
 
   const outputPath = path.join(params.paths.artifactsDir, "capture.mp4");
+  const sourceOutputPath = path.join(params.paths.artifactsDir, "source-capture.mp4");
+  const background = await resolveRecordingBackground();
   const targetOptions = captureTargetOptions(params.target);
   const args = [
     "-x",
     "-v",
     `-V${params.capture.maxDurationSeconds}`,
     ...targetOptions.args,
-    outputPath,
+    sourceOutputPath,
   ];
   const child = spawn("/usr/sbin/screencapture", args, {
     cwd: params.paths.runDir,
@@ -830,9 +869,13 @@ async function startNativeCapture(params: z.infer<typeof SessionParamsSchema>) {
     mode: "native",
     pid: child.pid,
     outputPath,
+    sourceOutputPath,
     startedAt: startedAt.toISOString(),
     expectedStopAt: new Date(startedAt.getTime() + params.capture.maxDurationSeconds * 1000).toISOString(),
     maxDurationSeconds: params.capture.maxDurationSeconds,
+    backgroundId: background.id,
+    backgroundPath: background.path,
+    backgroundSafeArea: background.safeArea,
     displayNumber: targetOptions.displayNumber,
     windowId: targetOptions.windowId,
     region: targetOptions.region,
@@ -864,25 +907,194 @@ async function waitForNativeCaptureArtifacts(state: z.infer<typeof NativeCapture
 }
 
 async function nativeCaptureArtifacts(state: z.infer<typeof NativeCaptureStateSchema>) {
+  const sourceOutputPath = await ensureNativeSourcePath(state);
+  await composeNativeCapture(state, sourceOutputPath);
+
   const bytes = await readFile(state.outputPath);
   const artifactStat = await stat(state.outputPath);
   if (!artifactStat.isFile() || bytes.byteLength === 0) {
     throw new Error(`native screen recording artifact is empty: ${state.outputPath}`);
   }
 
-  return [
+  const sourceBytes = await readFile(sourceOutputPath).catch(() => undefined);
+  const sourceStat = sourceBytes ? await stat(sourceOutputPath) : undefined;
+  const artifacts = [
     ArtifactRefSchema.parse({
-      artifactId: `art_native_${createHash("sha256").update(state.outputPath).digest("hex").slice(0, 24)}`,
+      artifactId: `art_native_composed_${createHash("sha256").update(state.outputPath).digest("hex").slice(0, 24)}`,
       kind: "video",
       path: state.outputPath,
+      relativePath: path.basename(state.outputPath),
+      role: "recording_primary",
+      label: "Composited recording",
       mediaType: "video/mp4",
       sha256: createHash("sha256").update(bytes).digest("hex"),
       bytes: bytes.byteLength,
       createdAt: new Date(artifactStat.mtimeMs).toISOString(),
+      durationMs: state.maxDurationSeconds * 1000,
       timeRangeMs: [0, state.maxDurationSeconds * 1000],
+      streamable: true,
+      seekable: true,
       redactionState: "raw",
     }),
   ];
+
+  if (sourceBytes && sourceStat?.isFile() && sourceBytes.byteLength > 0 && sourceOutputPath !== state.outputPath) {
+    artifacts.push(ArtifactRefSchema.parse({
+      artifactId: `art_native_source_${createHash("sha256").update(sourceOutputPath).digest("hex").slice(0, 24)}`,
+      kind: "video",
+      path: sourceOutputPath,
+      relativePath: path.basename(sourceOutputPath),
+      role: "source_capture",
+      label: "Source screen capture",
+      mediaType: "video/mp4",
+      sha256: createHash("sha256").update(sourceBytes).digest("hex"),
+      bytes: sourceBytes.byteLength,
+      createdAt: new Date(sourceStat.mtimeMs).toISOString(),
+      durationMs: state.maxDurationSeconds * 1000,
+      timeRangeMs: [0, state.maxDurationSeconds * 1000],
+      streamable: true,
+      seekable: true,
+      redactionState: "raw",
+    }));
+  }
+
+  return artifacts;
+}
+
+async function ensureNativeSourcePath(state: z.infer<typeof NativeCaptureStateSchema>) {
+  const sourceOutputPath = state.sourceOutputPath ?? path.join(path.dirname(state.outputPath), "source-capture.mp4");
+  if (await isNonEmptyFile(sourceOutputPath)) {
+    return sourceOutputPath;
+  }
+
+  if (sourceOutputPath !== state.outputPath && await isNonEmptyFile(state.outputPath)) {
+    await rename(state.outputPath, sourceOutputPath);
+    return sourceOutputPath;
+  }
+
+  throw new Error(`native source screen recording artifact is empty: ${sourceOutputPath}`);
+}
+
+async function composeNativeCapture(
+  state: z.infer<typeof NativeCaptureStateSchema>,
+  sourceOutputPath: string,
+) {
+  if (await isNonEmptyFile(state.outputPath)) {
+    return;
+  }
+  const background = await resolveRecordingBackground(state);
+  const compositorPath = await resolveVideoCompositorPath();
+  const safeArea = background.safeArea;
+  await execFileUtf8(compositorPath, [
+    sourceOutputPath,
+    background.path,
+    state.outputPath,
+    String(safeArea.x),
+    String(safeArea.y),
+    String(safeArea.width),
+    String(safeArea.height),
+  ], Math.max(60_000, state.maxDurationSeconds * 20_000));
+
+  const composedStat = await stat(state.outputPath);
+  if (!composedStat.isFile() || composedStat.size === 0) {
+    throw new Error(`native composed screen recording artifact is empty: ${state.outputPath}`);
+  }
+}
+
+async function isNonEmptyFile(filePath: string): Promise<boolean> {
+  const fileStat = await stat(filePath).catch(() => undefined);
+  return Boolean(fileStat?.isFile() && fileStat.size > 0);
+}
+
+async function resolveRecordingBackground(state?: z.infer<typeof NativeCaptureStateSchema>) {
+  const explicitPath = process.env.SPORES_RECORDING_BACKGROUND_PATH ?? state?.backgroundPath;
+  if (explicitPath) {
+    const safeArea = state?.backgroundSafeArea ?? DEFAULT_BACKGROUND_SAFE_AREA;
+    return {
+      id: state?.backgroundId ?? DEFAULT_BACKGROUND_ID,
+      path: explicitPath,
+      safeArea,
+    };
+  }
+
+  const manifestPath = await findBundledAsset(["assets", "recording-backgrounds", "manifest.json"]);
+  const manifest = RecordingBackgroundManifestSchema.parse(JSON.parse(await readFile(manifestPath, "utf8")));
+  const background = manifest.backgrounds.find((candidate) => candidate.id === DEFAULT_BACKGROUND_ID) ?? manifest.backgrounds[0];
+  if (!background) {
+    throw new Error(`recording background manifest has no backgrounds: ${manifestPath}`);
+  }
+  const backgroundPath = path.join(path.dirname(manifestPath), background.file);
+  const bytes = await readFile(backgroundPath);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (sha256 !== background.sha256) {
+    throw new Error(`recording background hash mismatch for ${backgroundPath}`);
+  }
+
+  return {
+    id: background.id,
+    path: backgroundPath,
+    safeArea: background.safeArea ?? DEFAULT_BACKGROUND_SAFE_AREA,
+  };
+}
+
+async function resolveVideoCompositorPath() {
+  const explicitPath = process.env.SPORES_VIDEO_COMPOSITOR_PATH;
+  if (explicitPath && await isNonEmptyFile(explicitPath)) {
+    return explicitPath;
+  }
+
+  return await findBundledAsset(["dist", "spores-video-compositor-macos"])
+    .catch(() => buildSourceVideoCompositor());
+}
+
+async function buildSourceVideoCompositor() {
+  const sourcePath = await findBundledAsset(["apps", "video-compositor-macos", "Sources", "main.swift"]);
+  const sourceStat = await stat(sourcePath);
+  const outputPath = path.join(
+    os.tmpdir(),
+    `spores-video-compositor-macos-${createHash("sha256").update(`${sourcePath}:${sourceStat.mtimeMs}`).digest("hex").slice(0, 16)}`,
+  );
+  if (await isNonEmptyFile(outputPath)) {
+    return outputPath;
+  }
+
+  await execFileUtf8("/usr/bin/xcrun", [
+    "swiftc",
+    "-parse-as-library",
+    "-O",
+    sourcePath,
+    "-o",
+    outputPath,
+  ], 60_000);
+  await chmod(outputPath, 0o755);
+  return outputPath;
+}
+
+async function findBundledAsset(relativeParts: string[]) {
+  const startDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(startDir, "..", ...relativeParts),
+    path.resolve(startDir, ...relativeParts),
+  ];
+
+  let cursor = startDir;
+  for (let depth = 0; depth < 8; depth += 1) {
+    candidates.push(path.join(cursor, "packages", "npm", ...relativeParts));
+    candidates.push(path.join(cursor, ...relativeParts));
+    const parent = path.dirname(cursor);
+    if (parent === cursor) {
+      break;
+    }
+    cursor = parent;
+  }
+
+  for (const candidate of candidates) {
+    if (await isNonEmptyFile(candidate)) {
+      return candidate;
+    }
+  }
+
+  throw new Error(`bundled asset not found: ${relativeParts.join("/")}`);
 }
 
 function nativeCaptureStatePath(params: z.infer<typeof SessionParamsSchema>) {

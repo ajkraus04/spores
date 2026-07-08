@@ -62,12 +62,13 @@ Output:
   "artifact": {
     "kind": "video",
     "path": ".spores/runs/run_123/artifacts/capture.mp4",
+    "role": "recording_primary",
     "mediaType": "video/mp4"
   },
   "result": {
     "runId": "run_123",
     "status": "complete",
-    "timeline": { "eventCount": 8, "frameCount": 2, "artifactCount": 1 }
+    "timeline": { "eventCount": 8, "frameCount": 2, "artifactCount": 2 }
   }
 }
 ```
@@ -199,13 +200,15 @@ Unknown-duration recordings use `safetyCapSeconds` with a default and maximum of
 30. Long recordings should be split into segments with agent annotations between
 segments.
 
-## Native MP4 Behavior
+## Video Artifact Behavior
 
 Native macOS capture uses `/usr/sbin/screencapture` through the recorder helper.
-It writes `artifacts/capture.mp4` and records `video/mp4` artifact metadata in
-the manifest. For native capture, stop waits for the timed file to become
-available when necessary. `native-capture.json` is retained in the run directory
-for recovery and debugging.
+It writes the raw source movie to `artifacts/source-capture.mp4`, composes that
+movie over the bundled recording background, and returns
+`artifacts/capture.mp4` as the primary `video/mp4` artifact with
+`role: "recording_primary"`. For native capture, stop waits for the timed file
+and composed MP4 to become available when necessary. `native-capture.json` is
+retained in the run directory for recovery and debugging.
 
 ## Event Stream Use
 
@@ -245,8 +248,8 @@ Agents should not receive:
 
 - Capture enforces the 1 to 30 second limit.
 - Begin enforces the 1 to 30 second safety cap.
-- Native capture returns `artifacts/capture.mp4` with `mediaType:
-  "video/mp4"`.
+- Native capture returns composed `artifacts/capture.mp4` with
+  `role: "recording_primary"` and `mediaType: "video/mp4"`.
 - Stop recovers completed helper artifacts when the active helper session is no
   longer attached.
 - Status returns output paths while recording.
