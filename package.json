@@ -1,5 +1,5 @@
 {
-  "name": "spores",
+  "name": "spores-workspace",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -15,6 +15,8 @@
     "test:e2e": "vitest run tests/e2e",
     "test:native": "SPORES_TEST_NATIVE_CAPTURE=1 vitest run tests/e2e/run-bundle-validation.test.ts tests/e2e/mcp-stdio.test.ts",
     "verify": "bun run typecheck && bun run test && bun run test:e2e && bun run smoke",
+    "build:npm": "bun scripts/build-npm-package.mjs",
+    "pack:npm": "bun run build:npm && npm pack ./packages/npm",
     "spores": "node node_modules/tsx/dist/cli.mjs apps/sporesd/src/cli.ts",
     "doctor": "bun run spores -- doctor",
     "status": "bun run spores -- status",

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
 
 import {
@@ -1185,7 +1186,18 @@ function platformDesktopBundleId(): string {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isDirectEntrypoint(argvPath: string | undefined): boolean {
+  if (!argvPath) {
+    return false;
+  }
+  try {
+    return realpathSync(argvPath) === fileURLToPath(import.meta.url);
+  } catch {
+    return import.meta.url === pathToFileURL(argvPath).href;
+  }
+}
+
+if (isDirectEntrypoint(process.argv[1])) {
   if (process.argv.includes("--stdio")) {
     process.exitCode = await runStdio();
   } else if (process.argv.includes("--list-targets")) {

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { Writable } from "node:stream";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createSporesService, SporesServiceError } from "./service.js";
 
@@ -257,6 +258,17 @@ function write(stream: Writable, value: string): void {
   stream.write(value);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isDirectEntrypoint(argvPath: string | undefined): boolean {
+  if (!argvPath) {
+    return false;
+  }
+  try {
+    return realpathSync(argvPath) === fileURLToPath(import.meta.url);
+  } catch {
+    return import.meta.url === pathToFileURL(argvPath).href;
+  }
+}
+
+if (isDirectEntrypoint(process.argv[1])) {
   process.exitCode = await runCli();
 }

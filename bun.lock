@@ -51,6 +51,15 @@
         "@spores/store": "0.1.0",
       },
     },
+    "packages/npm": {
+      "name": "@ajkraus04/spores",
+      "version": "0.1.0",
+      "bin": {
+        "spores": "dist/spores.js",
+        "sporesd": "dist/sporesd.js",
+        "spores-recorder-helper": "dist/spores-recorder-helper.js",
+      },
+    },
     "packages/schema": {
       "name": "@spores/schema",
       "version": "0.1.0",
@@ -67,6 +76,8 @@
     },
   },
   "packages": {
+    "@ajkraus04/spores": ["@ajkraus04/spores@workspace:packages/npm"],
+
     "@emnapi/core": ["@emnapi/core@1.11.1", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.2", "tslib": "^2.4.0" } }, "sha512-RSvbQmHzdKzNsLYa/wHrbc3KN4sYLKAdPZxqiM2HATqv/SBk2/ENSHpvXGaLOMcsAyz0poEGqkmmKYG3OWiJEQ=="],
 
     "@emnapi/runtime": ["@emnapi/runtime@1.11.1", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-vgj7R3y3Wgx24IQaGPA/R6YFXLHVMOZ0uVEyIQPaWs+rd1AzfEMXlAC22FYwO1XkKR6NPsq7mUandH8oIRdZFw=="],
