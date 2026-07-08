@@ -258,6 +258,8 @@ type TargetSnapshot = {
   targetDiscoveryError?: string;
 };
 
+type TargetDiscoveryMode = "native" | "deterministic";
+
 export function createHelperStatus(targetCount: number, snapshot?: Pick<TargetSnapshot, "targetSource" | "targetDiscoveryError">) {
   return {
     configured: true,
@@ -287,6 +289,13 @@ export async function listTargets(): Promise<TargetRef[]> {
 }
 
 async function listTargetSnapshot(): Promise<TargetSnapshot> {
+  if (targetDiscoveryMode() === "deterministic") {
+    return {
+      targets: deterministicTargets(),
+      targetSource: "deterministic_fallback",
+    };
+  }
+
   if (process.platform === "darwin") {
     let macOSError: unknown;
     const targets = await listMacOSTargets().catch((error) => {
@@ -310,6 +319,12 @@ async function listTargetSnapshot(): Promise<TargetSnapshot> {
     targets: deterministicTargets(),
     targetSource: "deterministic_fallback",
   };
+}
+
+function targetDiscoveryMode(): TargetDiscoveryMode {
+  return process.env.SPORES_TARGET_DISCOVERY_MODE?.trim().toLowerCase() === "deterministic"
+    ? "deterministic"
+    : "native";
 }
 
 function deterministicTargets(): TargetRef[] {

@@ -72,6 +72,40 @@ describe("spores CLI e2e", () => {
     }
     const packageTargets = RecorderHelperTargetsSchema.parse(JSON.parse(await runPackageScript("targets", ["--json"], runsRoot)));
     expect(packageTargets.targets.length).toBeGreaterThanOrEqual(1);
+
+    const setupDoctor = JSON.parse(
+      await runSporesCli(["setup", "doctor", "--json"], runsRoot, {
+        SPORES_RUNS_ROOT: runsRoot,
+        SPORES_PERMISSION_NATIVE_PROBE: "skip",
+      }),
+    );
+    expect(setupDoctor).toMatchObject({
+      ready: true,
+      readinessLevel: "native_recording",
+      nativeRecordingReady: true,
+      backend: "helper",
+      helper: { available: true },
+      permissions: { mode: "native_probe", requiresUserAction: false },
+      reasonCodes: [],
+    });
+    expect(setupDoctor.targetCount).toBeGreaterThanOrEqual(1);
+    expect(setupDoctor.recommendedTools).toContain("session_recording_capture");
+
+    const setupAlias = JSON.parse(
+      await runSporesCli(["setup", "--json"], runsRoot, {
+        SPORES_RUNS_ROOT: runsRoot,
+        SPORES_PERMISSION_NATIVE_PROBE: "skip",
+      }),
+    );
+    expect(setupAlias).toMatchObject({
+      ready: setupDoctor.ready,
+      readinessLevel: setupDoctor.readinessLevel,
+      permissions: { mode: "native_probe" },
+    });
+
+    const help = await runSporesCli(["help"], runsRoot);
+    expect(help).toContain("spores setup doctor [--json]");
+    expect(help).toContain("spores permissions probe [--json]");
   }, CLI_E2E_TIMEOUT_MS);
 
   it("prints permission status and request guidance as JSON from an external CLI process", async () => {
@@ -94,6 +128,22 @@ describe("spores CLI e2e", () => {
       },
     });
     expect(status.capabilities.find((capability) => capability.permission === "accessibility")).toMatchObject({
+      required: true,
+      status: "missing",
+    });
+
+    const probe = PermissionBrokerStatusSchema.parse(
+      JSON.parse(await runSporesCli(["permissions", "probe", "--json"], runsRoot, env)),
+    );
+    expect(probe).toMatchObject({
+      mode: "native_probe",
+      requiresUserAction: true,
+      snapshot: {
+        accessibility: "missing",
+        requiresUserAction: true,
+      },
+    });
+    expect(probe.capabilities.find((capability) => capability.permission === "accessibility")).toMatchObject({
       required: true,
       status: "missing",
     });
@@ -288,6 +338,23 @@ describe("spores CLI e2e", () => {
       opened: false,
       status: { error: { code: "helper_unavailable" } },
       actions: [],
+    });
+
+    const setupDoctor = JSON.parse(await runSporesCli(["setup", "doctor", "--json"], runsRoot, env));
+    expect(setupDoctor).toMatchObject({
+      ready: false,
+      readinessLevel: "not_ready",
+      nativeRecordingReady: false,
+      helper: { available: false, error: { code: "helper_unavailable" } },
+      permissions: { error: { code: "helper_unavailable" } },
+      targetCount: 0,
+      reasonCodes: expect.arrayContaining([
+        "helper_unavailable",
+        "permissions_require_user_action",
+        "no_targets",
+        "native_probe_not_run",
+      ]),
+      recommendedTools: ["recorder_permissions_probe", "recorder_permissions_request"],
     });
   }, CLI_E2E_TIMEOUT_MS);
 });

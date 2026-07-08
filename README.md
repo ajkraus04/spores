@@ -9,6 +9,46 @@ Spores is intentionally automation-framework agnostic. It can be used by
 browser agents, native desktop agents, shell-driven workflows, and human-guided
 test runs. Playwright is not required.
 
+## Agent Readiness Roadmap
+
+The Spores 15-agent readiness pass is captured as 15 implementation tracks.
+Items marked current are available in this checkout. Items marked planned are
+design targets and should not be treated as implemented behavior.
+
+1. Current: MCP-first startup through `bun run --silent mcp`, with
+   `spores_doctor`, `mcp:doctor`, and explicit tool discovery guidance.
+2. Current: local readiness checks through `recorder_ready`, including native
+   permission probes, timing limits, target counts, and recommended tools.
+3. Current: capturable target discovery through `recorder_context_snapshot` and
+   helper-listed displays, apps, windows, and screen bounds.
+4. Current: agent-safe target selection through `recorder_target_select`,
+   confidence scoring, ambiguity handling, alternatives, and snapshot-bound
+   validation.
+5. Current: one-shot recording through `session_recording_capture`, which
+   selects, records, stops, verifies artifacts, and returns a bounded result.
+6. Current: compatibility recording tools for target, window, app, region, and
+   active-window captures, all using bounded `seconds` input.
+7. Current: unknown-duration recording through `session_recording_begin` with a
+   bounded `safetyCapSeconds`, followed by `session_recording_stop`.
+8. Current: native macOS MP4 capture to `artifacts/capture.mp4`, with artifact
+   metadata for media type, bytes, SHA-256, time range, and redaction state.
+9. Current: recoverable local run bundles with `manifest.json`, `events.ndjson`,
+   `frames.ndjson`, artifacts, and `native-capture.json` for native sessions.
+10. Current: agent-authored event annotations through
+    `session_recording_append_agent_step` and queryable timelines through
+    `session_recording_query_timeline`.
+11. Current: bounded artifact reads through `session_recording_read_artifact`,
+    with metadata-first access for large video artifacts.
+12. Planned: a durable SQLite artifact/indexer layer for fast local search,
+    rebuilt indexes, retention decisions, and corruption reporting.
+13. Planned: redacted exports, share bundles, single-step clips, and
+    agent-readable JSON manifests produced from the local run bundle.
+14. Planned: replay-plan and reusable-skill drafting from event streams, with
+    stable integration recommendations instead of raw pointer replay.
+15. Planned: richer review and cross-platform workflows, including a review
+    viewer, better approval controls, app exclusion policy, and future Windows
+    and Linux helpers.
+
 ## Requirements
 
 - Bun `1.3.12`
@@ -22,10 +62,17 @@ Install dependencies:
 bun install
 ```
 
-Run the full local gate:
+Run the deterministic local gate:
 
 ```bash
 bun run verify
+```
+
+Live macOS capture tests are opt-in because they depend on current windows,
+display state, and TCC permissions:
+
+```bash
+SPORES_TEST_NATIVE_CAPTURE=1 bun run test:native
 ```
 
 ## Start The MCP Server
@@ -160,6 +207,8 @@ Select and validate a target before recording:
 
 For most tasks, use `session_recording_capture`. It selects a target, records,
 stops, verifies artifacts, and returns a bounded result summary in one response.
+Use `seconds` for fixed-duration recordings. It is an integer from 1 to 30 and
+defaults to 5.
 
 ## Common Recording Calls
 
@@ -255,6 +304,10 @@ If the agent does not know the duration up front, start with a safety cap:
   }
 }
 ```
+
+`safetyCapSeconds` is an integer from 1 to 30 and defaults to 30. Longer
+workflows should be split into multiple bounded recordings with agent step
+annotations between segments.
 
 Then stop when the task is done:
 
@@ -490,10 +543,11 @@ Run focused checks:
 bun run typecheck
 bun run test
 bun run test:e2e
+bun run test:native
 bun run smoke
 ```
 
-Run everything:
+Run the deterministic full gate:
 
 ```bash
 bun run verify

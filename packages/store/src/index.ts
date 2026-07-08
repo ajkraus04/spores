@@ -50,11 +50,12 @@ export class RunStore {
   readonly rootDir: string;
 
   constructor(rootDir = path.resolve(".spores/runs")) {
-    this.rootDir = rootDir;
+    this.rootDir = path.resolve(rootDir);
   }
 
   pathsForRun(runId: string): StorePaths {
-    const runDir = path.join(this.rootDir, runId);
+    const safeRunId = validateRunId(runId);
+    const runDir = containedPath(this.rootDir, path.resolve(this.rootDir, safeRunId), "run directory");
     return {
       runDir,
       manifest: path.join(runDir, "manifest.json"),
@@ -65,7 +66,7 @@ export class RunStore {
   }
 
   async createRun(input: CreateRunInput): Promise<RunManifest> {
-    const runId = input.runId ?? createSporesId("run");
+    const runId = validateRunId(input.runId ?? createSporesId("run"));
     const sessionId = input.sessionId ?? createSporesId("sess");
     const paths = this.pathsForRun(runId);
     const createdAt = nowIso();
@@ -101,11 +102,12 @@ export class RunStore {
   async readManifest(runId: string): Promise<RunManifest> {
     const paths = this.pathsForRun(runId);
     const raw = await readFile(paths.manifest, "utf8");
-    return RunManifestSchema.parse(JSON.parse(raw));
+    const manifest = RunManifestSchema.parse(JSON.parse(raw));
+    return this.normalizeManifest(manifest, validateRunId(runId));
   }
 
   async listRunIds(): Promise<string[]> {
-    return safeReadDirNames(this.rootDir);
+    return (await safeReadDirNames(this.rootDir)).filter(isValidRunId);
   }
 
   async listManifests(): Promise<RunManifest[]> {
@@ -126,18 +128,21 @@ export class RunStore {
   }
 
   async writeManifest(manifest: RunManifest): Promise<void> {
-    await mkdir(manifest.paths.runDir, { recursive: true });
-    await writeFile(manifest.paths.manifest, `${JSON.stringify(manifest, null, 2)}\n`);
+    const safeManifest = this.normalizeManifest(manifest);
+    await mkdir(safeManifest.paths.runDir, { recursive: true });
+    await writeFile(safeManifest.paths.manifest, `${JSON.stringify(safeManifest, null, 2)}\n`);
   }
 
   async updateManifest(runId: string, update: (manifest: RunManifest) => RunManifest): Promise<RunManifest> {
-    const current = await this.readManifest(runId);
+    const safeRunId = validateRunId(runId);
+    const current = await this.readManifest(safeRunId);
     const next = RunManifestSchema.parse({
       ...update(current),
       updatedAt: nowIso(),
     });
-    await this.writeManifest(next);
-    return next;
+    const safeNext = this.normalizeManifest(next, safeRunId);
+    await this.writeManifest(safeNext);
+    return safeNext;
   }
 
   async appendEvent(event: SporesEvent): Promise<SporesEvent> {
@@ -170,7 +175,7 @@ export class RunStore {
   } = {}): Promise<ArtifactRef> {
     const manifest = await this.readManifest(runId);
     const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content);
-    const artifactPath = path.join(manifest.paths.artifactsDir, relativePath);
+    const artifactPath = artifactPathForRelativePath(manifest.paths.artifactsDir, relativePath);
     await mkdir(path.dirname(artifactPath), { recursive: true });
     await writeFile(artifactPath, bytes);
 
@@ -230,6 +235,9 @@ export class RunStore {
   private async readManifestBySession(sessionId: string): Promise<RunManifest> {
     const runIds = await safeReadDirNames(this.rootDir);
     for (const runId of runIds) {
+      if (!isValidRunId(runId)) {
+        continue;
+      }
       const manifest = await this.readManifest(runId).catch(() => undefined);
       if (manifest?.sessionId === sessionId) {
         return manifest;
@@ -237,6 +245,115 @@ export class RunStore {
     }
     throw new Error(`session not found: ${sessionId}`);
   }
+
+  private normalizeManifest(manifest: RunManifest, expectedRunId?: string): RunManifest {
+    const runId = validateRunId(manifest.runId);
+    if (expectedRunId !== undefined && runId !== expectedRunId) {
+      throw new Error(`manifest runId mismatch: expected ${expectedRunId}, received ${runId}`);
+    }
+
+    const paths = this.pathsForRun(runId);
+    assertCanonicalManifestPaths(manifest.paths, paths);
+    const artifacts = manifest.artifacts.map((artifact) => normalizeArtifactPath(artifact, paths.artifactsDir));
+    return RunManifestSchema.parse({
+      ...manifest,
+      runId,
+      paths,
+      artifacts,
+    });
+  }
+}
+
+const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+function validateRunId(runId: string): string {
+  if (!RUN_ID_PATTERN.test(runId) || runId === "." || runId === ".." || runId.includes("\0")) {
+    throw new Error(`invalid runId: ${runId}`);
+  }
+  return runId;
+}
+
+function isValidRunId(runId: string): boolean {
+  try {
+    validateRunId(runId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function assertCanonicalManifestPaths(actual: StorePaths, expected: StorePaths): void {
+  assertSamePath(actual.runDir, expected.runDir, "manifest paths.runDir");
+  assertSamePath(actual.manifest, expected.manifest, "manifest paths.manifest");
+  assertSamePath(actual.events, expected.events, "manifest paths.events");
+  assertSamePath(actual.frames, expected.frames, "manifest paths.frames");
+  assertSamePath(actual.artifactsDir, expected.artifactsDir, "manifest paths.artifactsDir");
+}
+
+function assertSamePath(actual: string, expected: string, label: string): void {
+  const resolvedActual = containedPath(path.dirname(expected), actual, label);
+  const resolvedExpected = path.resolve(expected);
+  if (resolvedActual !== resolvedExpected) {
+    throw new Error(`${label} must be ${resolvedExpected}, received ${resolvedActual}`);
+  }
+}
+
+function normalizeArtifactPath(artifact: ArtifactRef, artifactsDir: string): ArtifactRef {
+  return ArtifactRefSchema.parse({
+    ...artifact,
+    path: resolveArtifactPath(artifactsDir, artifact.path),
+  });
+}
+
+function artifactPathForRelativePath(artifactsDir: string, relativePath: string): string {
+  const safeRelativePath = validateArtifactRelativePath(relativePath);
+  return containedPath(artifactsDir, path.resolve(artifactsDir, safeRelativePath), "artifact path", {
+    allowRoot: false,
+  });
+}
+
+function resolveArtifactPath(artifactsDir: string, artifactPath: string): string {
+  if (artifactPath.length === 0 || artifactPath.includes("\0")) {
+    throw new Error("artifact path must be non-empty");
+  }
+  if (path.win32.isAbsolute(artifactPath) && !path.isAbsolute(artifactPath)) {
+    throw new Error(`artifact path uses an unsupported absolute path format: ${artifactPath}`);
+  }
+  if (path.isAbsolute(artifactPath)) {
+    return containedPath(artifactsDir, artifactPath, "artifact path", { allowRoot: false });
+  }
+  return artifactPathForRelativePath(artifactsDir, artifactPath);
+}
+
+function validateArtifactRelativePath(relativePath: string): string {
+  if (relativePath.length === 0 || relativePath.includes("\0")) {
+    throw new Error("artifact relative path must be non-empty");
+  }
+  if (path.isAbsolute(relativePath) || path.win32.isAbsolute(relativePath)) {
+    throw new Error(`artifact relative path must not be absolute: ${relativePath}`);
+  }
+
+  const segments = relativePath.replaceAll("\\", "/").split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new Error(`artifact relative path contains an unsafe segment: ${relativePath}`);
+  }
+  return segments.join(path.sep);
+}
+
+function containedPath(
+  rootPath: string,
+  candidatePath: string,
+  label: string,
+  options: { allowRoot?: boolean } = {},
+): string {
+  const root = path.resolve(rootPath);
+  const candidate = path.resolve(candidatePath);
+  const relative = path.relative(root, candidate);
+  const insideRoot = relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  if (!insideRoot || (relative === "" && options.allowRoot === false)) {
+    throw new Error(`${label} escapes its allowed root: ${candidate}`);
+  }
+  return candidate;
 }
 
 async function readNdjson<T>(filePath: string, parse: (value: unknown) => T): Promise<T[]> {

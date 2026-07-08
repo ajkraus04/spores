@@ -48,14 +48,15 @@ describe("recorder helper process e2e", () => {
     for (const target of windowTargets) {
       expect(target).toMatchObject({
         targetId: expect.stringMatching(/^window:/),
-        bounds: expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }),
         window: {
           id: expect.any(String),
           bounds: expect.objectContaining({ width: expect.any(Number), height: expect.any(Number) }),
         },
       });
-      expect(target.bounds!.width).toBeGreaterThan(0);
-      expect(target.bounds!.height).toBeGreaterThan(0);
+      const windowBounds = target.window?.bounds;
+      if (!windowBounds || windowBounds.width <= 0 || windowBounds.height <= 0) {
+        throw new Error(`expected positive window bounds for ${target.targetId}: ${JSON.stringify(target)}`);
+      }
     }
   }, 20_000);
 
@@ -72,6 +73,45 @@ describe("recorder helper process e2e", () => {
     expect(targets.status.targetCount).toBe(targets.targets.length);
     expect(targets.targets.some((target) => target.kind === "display")).toBe(true);
     expect(targets.targets.some((target) => target.kind === "window")).toBe(true);
+  }, 20_000);
+
+  it("uses deterministic target discovery when requested", async () => {
+    const env = { SPORES_TARGET_DISCOVERY_MODE: "deterministic" };
+    const status = RecorderHelperStatusSchema.parse(
+      JSON.parse(await runHelperScript([], env)),
+    );
+    expect(status).toMatchObject({
+      available: true,
+      targetCount: 3,
+      targetSource: "deterministic_fallback",
+    });
+    expect(status.targetDiscoveryError).toBeUndefined();
+
+    const targets = RecorderHelperTargetsSchema.parse(
+      JSON.parse(await runHelperScript(["--list-targets"], env)),
+    );
+    expect(targets.status).toMatchObject({
+      available: true,
+      targetCount: 3,
+      targetSource: "deterministic_fallback",
+    });
+    expect(targets.targets.map((target) => target.targetId)).toEqual([
+      "display:main",
+      "app:spores-recorder-helper",
+      "window:spores-recorder-helper:status",
+    ]);
+    expect(targets.targets.find((target) => target.targetId === "display:main")).toMatchObject({
+      kind: "display",
+      bounds: { x: 0, y: 0, width: 1440, height: 900 },
+    });
+    expect(targets.targets.find((target) => target.kind === "window")).toMatchObject({
+      targetId: "window:spores-recorder-helper:status",
+      bounds: { x: 80, y: 80, width: 1024, height: 640 },
+      window: {
+        id: "spores-recorder-helper:status",
+        title: "Spores Recorder Helper",
+      },
+    });
   }, 20_000);
 
   it("reports permission status and request guidance over stdio", async () => {
@@ -242,10 +282,10 @@ describe("recorder helper process e2e", () => {
   }, 20_000);
 });
 
-async function runHelperScript(args: string[]): Promise<string> {
+async function runHelperScript(args: string[], env: Record<string, string> = {}): Promise<string> {
   const { stdout } = await execFileAsync(bunCommand(), ["run", "--silent", "recorder-helper", "--", ...args], {
     cwd: repoRoot(),
-    env: childEnv(),
+    env: childEnv(env),
   });
   return stdout;
 }

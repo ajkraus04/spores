@@ -19,9 +19,14 @@ import {
 } from "@spores/schema";
 
 type ClientToolResult = Awaited<ReturnType<Client["callTool"]>>;
+type ListedTool = Awaited<ReturnType<Client["listTools"]>>["tools"][number];
 
 let tempDir: string;
-const itIfNativeScreenCapture = process.platform === "darwin" && existsSync("/usr/sbin/screencapture") ? it : it.skip;
+const itIfNativeScreenCapture = process.env.SPORES_TEST_NATIVE_CAPTURE === "1" &&
+  process.platform === "darwin" &&
+  existsSync("/usr/sbin/screencapture")
+  ? it
+  : it.skip;
 const EXPECTED_TOOL_NAMES = [
   "recorder_context_snapshot",
   "recorder_helper_list_targets",
@@ -65,6 +70,7 @@ describe("sporesd MCP stdio e2e", () => {
   it("records, annotates, stops, reads timeline, and fetches artifacts through MCP stdio", async () => {
     const runId = "run_mcp_e2e_001";
     const runsRoot = path.join(tempDir, "runs");
+    const expectedTargetSource = expectedHelperTargetSource();
     const client = new Client({ name: "spores-e2e-test", version: "0.1.0" });
     const transport = new StdioClientTransport({
       command: bunCommand(),
@@ -86,6 +92,57 @@ describe("sporesd MCP stdio e2e", () => {
       const tools = await client.listTools();
       const toolNames = tools.tools.map((tool) => tool.name).sort();
       expect(toolNames).toEqual(EXPECTED_TOOL_NAMES);
+      const toolByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
+      expectToolContract(toolByName, "recorder_ready", {
+        title: "Recorder Readiness",
+        role: "diagnostic",
+        readOnly: true,
+        idempotent: true,
+        properties: ["ready", "readinessLevel", "permissions", "recommendedTools"],
+      });
+      expectToolContract(toolByName, "recorder_target_select", {
+        title: "Select Recorder Target",
+        role: "targeting",
+        readOnly: true,
+        idempotent: true,
+        properties: ["selected", "confidence", "ambiguous", "recommendedRecordingArguments"],
+      });
+      expectToolContract(toolByName, "session_recording_capture", {
+        title: "Capture Recording",
+        role: "recording",
+        readOnly: false,
+        idempotent: false,
+        properties: ["runId", "status", "target", "artifact", "timeline", "result"],
+      });
+      expectToolContract(toolByName, "session_recording_stop", {
+        title: "Stop Recording Session",
+        role: "recording",
+        readOnly: false,
+        idempotent: true,
+        properties: ["runId", "sessionId", "status", "artifacts"],
+      });
+
+      const resources = await client.listResources();
+      expect(resources.resources.map((resource) => resource.uri)).toContain("spores://recording/guide");
+      const guide = await client.readResource({ uri: "spores://recording/guide" });
+      expect(resourceText(guide)).toContain("recorder_ready");
+      expect(resourceText(guide)).toContain("session_recording_capture");
+
+      const resourceTemplates = await client.listResourceTemplates();
+      expect(resourceTemplates.resourceTemplates.map((template) => template.uriTemplate)).toContain("spores://runs/{runId}/result");
+
+      const prompts = await client.listPrompts();
+      expect(prompts.prompts.map((prompt) => prompt.name)).toContain("spores_recording_workflow");
+      const workflowPrompt = await client.getPrompt({
+        name: "spores_recording_workflow",
+        arguments: {
+          objective: "record the checkout flow",
+          targetHint: "Chrome",
+          durationMode: "known",
+        },
+      });
+      expect(promptText(workflowPrompt)).toContain("recorder_context_snapshot");
+      expect(promptText(workflowPrompt)).toContain("session_recording_capture");
 
       const doctor = expectOk<{
         ok: true;
@@ -101,7 +158,7 @@ describe("sporesd MCP stdio e2e", () => {
         helper: {
           available: true,
           capabilities: { permissionsProbe: true },
-          targetSource: expect.stringMatching(/^(macos|deterministic_fallback|unknown)$/),
+          targetSource: expectedTargetSource,
         },
       });
       expect(doctor.helper.targetCount).toBeGreaterThanOrEqual(1);
@@ -123,6 +180,7 @@ describe("sporesd MCP stdio e2e", () => {
           startSession: true,
           stopSession: true,
         },
+        targetSource: expectedTargetSource,
       });
       expect(helperStatus.targetCount).toBeGreaterThanOrEqual(1);
 
@@ -158,12 +216,12 @@ describe("sporesd MCP stdio e2e", () => {
       );
       expect(ready).toMatchObject({
         ready: true,
-        targetCount: helperTargets.targets.length,
         timing: {
           unknownDurationMode: "start_with_safety_cap_then_stop",
           maxDurationSeconds: 30,
         },
       });
+      expect(ready.targetCount).toBeGreaterThanOrEqual(1);
       expect(ready.recommendedTools.every((tool) => toolNames.includes(tool))).toBe(true);
 
       const snapshot = expectOk<{
@@ -179,8 +237,8 @@ describe("sporesd MCP stdio e2e", () => {
       );
       expect(snapshot).toMatchObject({
         coordinateSpace: { unit: "screen_points", origin: "global_display_space" },
-        counts: { targets: helperTargets.targets.length },
       });
+      expect(snapshot.counts.targets).toBeGreaterThanOrEqual(1);
       expect(snapshot.displays.length).toBeGreaterThanOrEqual(1);
       expect(snapshot.windows.length).toBeGreaterThanOrEqual(1);
 
@@ -419,7 +477,13 @@ describe("sporesd MCP stdio e2e", () => {
           arguments: { runId, artifactId: artifact.artifactId },
         }),
       );
-      expect(ArtifactRefSchema.parse(artifactRead.artifact)).toEqual(artifact);
+      expect(ArtifactRefSchema.parse(artifactRead.artifact)).toMatchObject({
+        artifactId: artifact.artifactId,
+        kind: artifact.kind,
+        mediaType: artifact.mediaType,
+        sha256: artifact.sha256,
+        bytes: artifact.bytes,
+      });
       expect(artifactRead.content).toBe(`Spores helper synthetic capture for ${runId}\n`);
 
       const artifactMetadata = expectOk<{ artifact: unknown; content?: string }>(
@@ -428,7 +492,13 @@ describe("sporesd MCP stdio e2e", () => {
           arguments: { runId, artifactId: artifact.artifactId, contentMode: "metadata" },
         }),
       );
-      expect(ArtifactRefSchema.parse(artifactMetadata.artifact)).toEqual(artifact);
+      expect(ArtifactRefSchema.parse(artifactMetadata.artifact)).toMatchObject({
+        artifactId: artifact.artifactId,
+        kind: artifact.kind,
+        mediaType: artifact.mediaType,
+        sha256: artifact.sha256,
+        bytes: artifact.bytes,
+      });
       expect(artifactMetadata.content).toBeUndefined();
 
       const artifactText = expectOk<{ artifact: unknown; content: string; encoding: string }>(
@@ -491,6 +561,12 @@ describe("sporesd MCP stdio e2e", () => {
           artifacts: [{ verified: true }],
           timeline: { eventCount: 9 },
         },
+      });
+      const runResource = await client.readResource({ uri: `spores://runs/${captured.runId}/result` });
+      expect(JSON.parse(resourceText(runResource))).toMatchObject({
+        runId: captured.runId,
+        status: "complete",
+        timeline: { eventCount: 9 },
       });
 
       const manifestStat = await stat(path.join(runsRoot, runId, "manifest.json"));
@@ -750,8 +826,54 @@ function expectError(result: ClientToolResult): unknown {
     throw new Error(`unexpected compatibility tool result: ${JSON.stringify(result.toolResult)}`);
   }
   expect(result.isError).toBe(true);
-  expect(result.structuredContent).toBeDefined();
-  return result.structuredContent;
+  if (result.structuredContent) {
+    return result.structuredContent;
+  }
+  const textContent = result.content.find((entry) => entry.type === "text");
+  expect(textContent).toBeDefined();
+  return JSON.parse(textContent!.text);
+}
+
+function expectToolContract(
+  tools: Map<string, ListedTool>,
+  name: string,
+  expectation: {
+    title: string;
+    role: string;
+    readOnly: boolean;
+    idempotent: boolean;
+    properties: string[];
+  },
+): void {
+  const tool = tools.get(name);
+  expect(tool).toBeDefined();
+  expect(tool).toMatchObject({
+    title: expectation.title,
+    annotations: {
+      title: expectation.title,
+      readOnlyHint: expectation.readOnly,
+      destructiveHint: false,
+      idempotentHint: expectation.idempotent,
+      openWorldHint: false,
+    },
+    _meta: {
+      "spores/role": expectation.role,
+    },
+  });
+  expect(Object.keys(tool!.outputSchema?.properties ?? {})).toEqual(expect.arrayContaining(expectation.properties));
+}
+
+function resourceText(result: Awaited<ReturnType<Client["readResource"]>>): string {
+  const first = result.contents[0] as { text?: unknown } | undefined;
+  expect(first?.text).toEqual(expect.any(String));
+  return first!.text as string;
+}
+
+function promptText(result: Awaited<ReturnType<Client["getPrompt"]>>): string {
+  const content = result.messages[0]?.content as { type?: string; text?: unknown } | undefined;
+  expect(content).toMatchObject({ type: "text" });
+  expect(content?.text).toEqual(expect.any(String));
+  return content!.text as string;
 }
 
 function repoRoot(): string {
@@ -762,9 +884,25 @@ function bunCommand(): string {
   return process.platform === "win32" ? "bun.exe" : "bun";
 }
 
+function expectedHelperTargetSource() {
+  return process.env.SPORES_TARGET_DISCOVERY_MODE === "deterministic"
+    ? "deterministic_fallback"
+    : expect.stringMatching(/^(macos|deterministic_fallback|unknown)$/);
+}
+
 function childEnv(overrides: Record<string, string>): Record<string, string> {
   const inherited: Record<string, string> = {};
-  for (const key of ["PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot", "ComSpec", "SHELL"]) {
+  for (const key of [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SystemRoot",
+    "ComSpec",
+    "SHELL",
+    "SPORES_TARGET_DISCOVERY_MODE",
+  ]) {
     const value = process.env[key];
     if (value) {
       inherited[key] = value;

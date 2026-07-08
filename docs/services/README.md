@@ -3,6 +3,10 @@
 Each service has a separate plan file. Keep implementation aligned to these
 boundaries unless the product shape changes.
 
+Service plans distinguish current behavior from planned behavior. Do not move a
+planned item into the current sections until the corresponding tool, bundle
+format, or workflow is implemented and covered by the local verification gate.
+
 ## Services
 
 1. [Spores MCP Host and `sporesd`](01-sporesd-control-plane.md)
@@ -43,3 +47,13 @@ flowchart TD
 The native helper owns capture and OS permissions. The MCP host owns product
 state, local APIs, and tool routing. Dedicated MCP surfaces should be thin
 clients over the same internal protocol.
+
+Agent-facing docs should prefer the current workflow:
+
+1. `recorder_ready`
+2. `recorder_context_snapshot`
+3. `recorder_target_select`
+4. `session_recording_capture` for known durations, or
+   `session_recording_begin` plus `session_recording_stop` for unknown durations
+5. `session_recording_result`, `session_recording_query_timeline`, and
+   metadata-first `session_recording_read_artifact`
