@@ -21,8 +21,17 @@ afterEach(async () => {
 });
 
 describe("installable spores package e2e", () => {
+  it("bundles the selected dark Hypha recording background", async () => {
+    const packed = await packNpmPackage(tempDir);
+
+    expect(packed.files.map((file) => file.path)).toEqual(expect.arrayContaining([
+      "assets/recording-backgrounds/hypha-dark.png",
+      "assets/recording-backgrounds/manifest.json",
+    ]));
+  }, PACKAGE_INSTALL_TIMEOUT_MS);
+
   it("runs setup through npx and bunx from the npm tarball", async () => {
-    const tarball = await packNpmPackage(tempDir);
+    const { tarball } = await packNpmPackage(tempDir);
 
     const npxSetup = await runSetupVia("npx", tarball, path.join(tempDir, "npx-runs"));
     expect(npxSetup).toMatchObject({
@@ -46,7 +55,7 @@ describe("installable spores package e2e", () => {
   }, PACKAGE_INSTALL_TIMEOUT_MS);
 
   it("starts the installed MCP server through npx", async () => {
-    const tarball = await packNpmPackage(tempDir);
+    const { tarball } = await packNpmPackage(tempDir);
     const runsRoot = path.join(tempDir, "mcp-runs");
     const client = new Client({ name: "spores-package-install-e2e", version: "0.1.0" });
     const transport = new StdioClientTransport({
@@ -110,7 +119,10 @@ async function runSetupVia(command: "npx" | "bunx", tarball: string, runsRoot: s
   return JSON.parse(stdout);
 }
 
-async function packNpmPackage(packDestination: string): Promise<string> {
+async function packNpmPackage(packDestination: string): Promise<{
+  tarball: string;
+  files: Array<{ path: string; size: number; mode: number }>;
+}> {
   const { stdout } = await execFileAsync("npm", [
     "pack",
     path.join(repoRoot(), "packages", "npm"),
@@ -122,11 +134,17 @@ async function packNpmPackage(packDestination: string): Promise<string> {
     env: childEnv({}),
     maxBuffer: 10 * 1024 * 1024,
   });
-  const [packed] = JSON.parse(stdout) as Array<{ filename: string }>;
+  const [packed] = JSON.parse(stdout) as Array<{
+    filename: string;
+    files: Array<{ path: string; size: number; mode: number }>;
+  }>;
   if (!packed) {
     throw new Error("npm pack did not return a package result");
   }
-  return path.join(packDestination, packed.filename);
+  return {
+    tarball: path.join(packDestination, packed.filename),
+    files: packed.files,
+  };
 }
 
 function expectStructured<T>(result: Awaited<ReturnType<Client["callTool"]>>): T {

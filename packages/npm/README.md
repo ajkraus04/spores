@@ -17,3 +17,10 @@ bunx @ajkraus04/spores mcp
 ```
 
 Use `SPORES_RUNS_ROOT` to choose where local run bundles are written.
+
+Bundled recording background:
+
+```text
+assets/recording-backgrounds/hypha-dark.png
+assets/recording-backgrounds/manifest.json
+```

@@ -117,6 +117,14 @@ sporesd
 spores-recorder-helper
 ```
 
+It also bundles the selected dark Hypha recording background for future video
+composition:
+
+```text
+assets/recording-backgrounds/hypha-dark.png
+assets/recording-backgrounds/manifest.json
+```
+
 `npx spores@setup` is not the intended interface. That would require a mutable
 npm dist-tag named `setup`; use the stable `@ajkraus04/spores setup`
 subcommand instead. The unscoped package name `spores` is blocked by npm's
