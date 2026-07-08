@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "backgrounds": [
+    {
+      "id": "hypha-dark",
+      "theme": "dark",
+      "file": "hypha-dark.png",
+      "mediaType": "image/png",
+      "width": 1672,
+      "height": 941,
+      "sha256": "f885d40a2014c28a3d4f35777b05f2ae363515d62774b79a79ff3465242fe515",
+      "purpose": "Default dark Hypha background for compositing recorded MP4 captures.",
+      "safeArea": {
+        "x": 0.07,
+        "y": 0.09,
+        "width": 0.86,
+        "height": 0.8
+      }
+    }
+  ]
+}

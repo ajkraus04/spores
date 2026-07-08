@@ -112,6 +112,7 @@ Every event must include:
 
 ```text
 capture.mp4
+source-capture.mp4
 events.ndjson
 frames.ndjson
 accessibility.ndjson
@@ -150,4 +151,3 @@ Blocked capture should emit `capture.blocked` rather than silently omitting data
 4. Add mouse click events.
 5. Add accessibility snapshots.
 6. Add app/window exclusion rules.
-

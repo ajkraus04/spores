@@ -17,3 +17,14 @@ bunx @ajkraus04/spores mcp
 ```
 
 Use `SPORES_RUNS_ROOT` to choose where local run bundles are written.
+
+Native recordings return a composed `artifacts/capture.mp4` as the primary
+agent-facing artifact. The unmodified screen recording is retained separately as
+`artifacts/source-capture.mp4` when native capture is used.
+
+Bundled recording background:
+
+```text
+assets/recording-backgrounds/hypha-dark.png
+assets/recording-backgrounds/manifest.json
+```

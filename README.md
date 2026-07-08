@@ -30,8 +30,9 @@ design targets and should not be treated as implemented behavior.
    active-window captures, all using bounded `seconds` input.
 7. Current: unknown-duration recording through `session_recording_begin` with a
    bounded `safetyCapSeconds`, followed by `session_recording_stop`.
-8. Current: native macOS MP4 capture to `artifacts/capture.mp4`, with artifact
-   metadata for media type, bytes, SHA-256, time range, and redaction state.
+8. Current: native macOS MP4 capture to `artifacts/capture.mp4`, automatically
+   composited over the bundled background, with source capture retained at
+   `artifacts/source-capture.mp4`.
 9. Current: recoverable local run bundles with `manifest.json`, `events.ndjson`,
    `frames.ndjson`, artifacts, and `native-capture.json` for native sessions.
 10. Current: agent-authored event annotations through
@@ -115,6 +116,14 @@ The published package exposes these executables:
 spores
 sporesd
 spores-recorder-helper
+```
+
+It also bundles the selected dark Hypha recording background used to compose
+every native MP4 recording:
+
+```text
+assets/recording-backgrounds/hypha-dark.png
+assets/recording-backgrounds/manifest.json
 ```
 
 `npx spores@setup` is not the intended interface. That would require a mutable
@@ -452,11 +461,13 @@ run directory. A bundle contains:
 - `manifest.json`: run metadata, selected target, permissions, artifact refs
 - `events.ndjson`: ordered recording and agent events
 - `frames.ndjson`: frame references and video-time linkage
-- `artifacts/capture.mp4`: native video artifact
+- `artifacts/capture.mp4`: composed agent-facing native video artifact
+- `artifacts/source-capture.mp4`: raw native source capture, when present
 - `native-capture.json`: native capture backend state for recovery/debugging
 
 Video artifacts include file path, media type, bytes, SHA-256, time range, and
-redaction state. The final frame links to the video artifact ID.
+redaction state. The final frame links to the composed `capture.mp4` artifact
+ID.
 
 Read result summaries and artifacts through bounded tools:
 
@@ -581,8 +592,10 @@ known region first:
 }
 ```
 
-Successful native recordings write `artifacts/capture.mp4` and return a video
-artifact with `mediaType: "video/mp4"`.
+Successful native recordings write `artifacts/capture.mp4` and return that
+composed video as the primary artifact with `role: "recording_primary"` and
+`mediaType: "video/mp4"`. Raw source capture is retained separately as
+`artifacts/source-capture.mp4` with `role: "source_capture"`.
 
 ## CLI
 

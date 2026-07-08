@@ -9,6 +9,7 @@
     "spores-recorder-helper": "dist/spores-recorder-helper.js"
   },
   "files": [
+    "assets",
     "dist",
     "README.md"
   ],

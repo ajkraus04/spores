@@ -639,6 +639,8 @@ describe("sporesd MCP stdio e2e", () => {
       const artifact = ArtifactRefSchema.parse(recorded.artifact);
       expect(artifact).toMatchObject({
         kind: "video",
+        role: "recording_primary",
+        relativePath: "capture.mp4",
         mediaType: "video/mp4",
         redactionState: "raw",
       });
@@ -656,12 +658,17 @@ describe("sporesd MCP stdio e2e", () => {
         ),
       );
       expect(timeline.frames[1]!.artifactId).toBe(artifact.artifactId);
+      expect(timeline.artifacts.find((candidate) => candidate.role === "source_capture")).toMatchObject({
+        kind: "video",
+        mediaType: "video/mp4",
+        relativePath: "source-capture.mp4",
+      });
       expect(timeline.events[1]!.payload).toMatchObject({
         nativeCapture: true,
         captureBackend: "screencapture",
       });
       const nativeState = JSON.parse(await readFile(path.join(runsRoot, runId, "native-capture.json"), "utf8"));
-      expect(nativeState).toMatchObject({ region: bounds });
+      expect(nativeState).toMatchObject({ region: bounds, backgroundId: "hypha-dark" });
       expect(nativeState.captureArgs).toContain("-R0,0,320,240");
     } catch (error) {
       if (stderr.length > 0) {
