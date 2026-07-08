@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "vitest run tests/e2e",
+    "test:native": "SPORES_TEST_NATIVE_CAPTURE=1 vitest run tests/e2e/run-bundle-validation.test.ts tests/e2e/mcp-stdio.test.ts",
     "verify": "bun run typecheck && bun run test && bun run test:e2e && bun run smoke",
     "spores": "node node_modules/tsx/dist/cli.mjs apps/sporesd/src/cli.ts",
     "doctor": "bun run spores -- doctor",

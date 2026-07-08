@@ -21,10 +21,12 @@ const VERSION = "0.1.0";
 const HELP = `Spores CLI
 
 Usage:
+  spores setup doctor [--json]
   spores doctor [--json]
   spores status [--json] [--run-id <run-id>]
   spores targets [--json]
   spores permissions status [--json]
+  spores permissions probe [--json]
   spores permissions request [--json]
   spores mcp
   spores help
@@ -54,6 +56,14 @@ export async function runCli(
       case "version":
         write(io.stdout, `${VERSION}\n`);
         return 0;
+      case "setup":
+        switch (parsed.subcommand ?? "doctor") {
+          case "doctor":
+            writeValue(io.stdout, parsed.json, await service.ready(), formatSetupDoctor);
+            return 0;
+          default:
+            throw new Error(`unknown setup command: ${parsed.subcommand}`);
+        }
       case "doctor":
         writeValue(io.stdout, parsed.json, await service.doctor(), formatDoctor);
         return 0;
@@ -67,6 +77,9 @@ export async function runCli(
         switch (parsed.subcommand ?? "status") {
           case "status":
             writeValue(io.stdout, parsed.json, await service.permissionsStatus(), formatPermissionsStatus);
+            return 0;
+          case "probe":
+            writeValue(io.stdout, parsed.json, await service.permissionsProbe(), formatPermissionsStatus);
             return 0;
           case "request":
             writeValue(io.stdout, parsed.json, await service.requestPermissions(), formatPermissionsRequest);
@@ -96,7 +109,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   };
   const args = [...rest];
 
-  if (command === "permissions" && args[0] && !args[0].startsWith("-")) {
+  if ((command === "permissions" || command === "setup") && args[0] && !args[0].startsWith("-")) {
     parsed.subcommand = args.shift();
   }
 
@@ -127,6 +140,25 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 function writeValue<T>(stream: Writable, json: boolean, value: T, format: (value: T) => string): void {
   write(stream, json ? `${JSON.stringify(value, null, 2)}\n` : format(value));
+}
+
+function formatSetupDoctor(value: Awaited<ReturnType<ReturnType<typeof createSporesService>["ready"]>>): string {
+  const missing = value.missingRequiredPermissions.map((capability) => capability.permission);
+  return [
+    "Spores setup doctor",
+    `ready: ${value.ready}`,
+    `readiness_level: ${value.readinessLevel}`,
+    `native_recording_ready: ${value.nativeRecordingReady}`,
+    `backend: ${value.backend}`,
+    `helper_available: ${value.helper.available}`,
+    `permissions_mode: ${value.permissions.mode}`,
+    `requires_user_action: ${value.permissions.requiresUserAction}`,
+    `target_count: ${value.targetCount}`,
+    `reason_codes: ${value.reasonCodes.length > 0 ? value.reasonCodes.join(",") : "-"}`,
+    `missing_required_permissions: ${missing.length > 0 ? missing.join(",") : "-"}`,
+    `recommended_tools: ${value.recommendedTools.join(",")}`,
+    "",
+  ].join("\n");
 }
 
 function formatDoctor(value: Awaited<ReturnType<ReturnType<typeof createSporesService>["doctor"]>>): string {

@@ -191,6 +191,7 @@ export class FakeRecorder {
       sequence: latest.frameCount,
       monotonicTimeNs: monotonicTimeNs(),
       videoTimeMs,
+      accuracy: "actual",
     });
   }
 }

@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { lstat, open, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
 import { FakeRecorder } from "@spores/fake-recorder";
 import {
+  AgentAssertionSchema,
+  AgentStepPayloadSchema,
   ArtifactRef,
   ArtifactRefSchema,
   BoundsSchema,
+  CausalLinkSchema,
   EventTypeSchema,
   FrameRef,
   PermissionBrokerStatus,
@@ -18,6 +21,9 @@ import {
   SporesEventSchema,
   TargetRef,
   TargetRefSchema,
+  ToolCallSchema,
+  TraceAnchorSchema,
+  TraceSpanSchema,
   createSporesId,
   monotonicTimeNs,
   nowIso,
@@ -34,18 +40,20 @@ const CaptureInputSchema = z.object({
   maxDurationSeconds: z.number().int().min(1).max(30).default(2),
 });
 
-const TargetKindSchema = z.enum(["display", "window", "app", "region", "fake"]);
+const TargetKindSchema = z.enum(["display", "window", "app", "region", "browser_tab", "fake"]);
 const ConfidenceSchema = z.enum(["low", "medium", "high"]);
 
 export const TargetSelectorInputSchema = z.object({
-  targetId: z.string().optional(),
-  kind: TargetKindSchema.optional(),
-  displayId: z.string().optional(),
-  app: z.string().optional(),
-  bundleId: z.string().optional(),
-  titleIncludes: z.string().optional(),
-  bounds: BoundsSchema.optional(),
-  prefer: z.enum(["frontmost", "largest", "exact"]).default("frontmost"),
+  targetId: z.string().describe("Snapshot-local target id from recorder_context_snapshot or recorder_target_select.").optional(),
+  kind: TargetKindSchema.describe("Target category to match. Use region with bounds for explicit coordinates.").optional(),
+  displayId: z.string().describe("Display id such as main or a helper-provided display ordinal.").optional(),
+  app: z.string().describe("App name or bundle id substring to match.").optional(),
+  bundleId: z.string().describe("Exact native app bundle id to match when known.").optional(),
+  titleIncludes: z.string().describe("Window or tab title substring to match.").optional(),
+  urlIncludes: z.string().describe("Browser tab URL substring to match when browser metadata is available.").optional(),
+  origin: z.string().describe("Browser tab origin to match when browser metadata is available.").optional(),
+  bounds: BoundsSchema.describe("Explicit screen coordinates for region capture.").optional(),
+  prefer: z.enum(["frontmost", "largest", "exact"]).describe("How to rank multiple candidates when no exact targetId is supplied.").default("frontmost"),
 });
 
 const OneShotTimingInputSchema = z.object({
@@ -72,6 +80,8 @@ export const TargetSelectInputSchema = z.object({
 export const TargetValidateInputSchema = z.object({
   snapshotId: z.string().optional(),
   targetId: z.string(),
+  targetToken: z.string().optional(),
+  requireFresh: z.boolean().default(true),
 });
 
 export const ContextSnapshotInputSchema = z.object({});
@@ -162,12 +172,19 @@ export const AppendAgentStepInputSchema = z.object({
   stepId: z.string().min(1).max(200),
   kind: z.enum(["decision", "action", "observation", "assertion"]),
   summary: z.string().min(1).max(4_000),
+  rationale: z.string().max(8_000).optional(),
+  intent: z.string().max(8_000).optional(),
+  basis: z.string().max(8_000).optional(),
+  expectedOutcome: z.string().max(8_000).optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  anchors: z.array(TraceAnchorSchema).optional(),
+  causedBy: z.array(CausalLinkSchema).optional(),
+  span: TraceSpanSchema.optional(),
+  toolCall: ToolCallSchema.optional(),
+  observation: z.record(z.string(), z.unknown()).optional(),
+  custom: z.record(z.string(), z.unknown()).optional(),
   details: z.record(z.string(), z.unknown()).default({}),
-  assertion: z.object({
-    expected: z.string().max(8_000),
-    actual: z.string().max(8_000),
-    status: z.enum(["passed", "failed", "unknown"]),
-  }).optional(),
+  assertion: AgentAssertionSchema.optional(),
 }).superRefine((input, context) => {
   if (input.kind === "assertion" && !input.assertion) {
     context.addIssue({
@@ -176,7 +193,24 @@ export const AppendAgentStepInputSchema = z.object({
       message: "assertion is required when kind is assertion",
     });
   }
-  const reservedKeys = ["stepId", "kind", "summary", "assertion"];
+  const reservedKeys = [
+    "stepId",
+    "kind",
+    "summary",
+    "rationale",
+    "intent",
+    "basis",
+    "expectedOutcome",
+    "confidence",
+    "hiddenCotStored",
+    "anchors",
+    "causedBy",
+    "span",
+    "toolCall",
+    "observation",
+    "assertion",
+    "custom",
+  ];
   for (const key of reservedKeys) {
     if (Object.hasOwn(input.details, key)) {
       context.addIssue({
@@ -218,6 +252,10 @@ export const RecordingResultInputSchema = z.object({
 export const TimelineQueryInputSchema = z.object({
   runId: z.string(),
   afterSequence: z.number().int().min(0).optional(),
+  stepId: z.string().optional(),
+  spanId: z.string().optional(),
+  aroundEventId: z.string().optional(),
+  anchorArtifactId: z.string().optional(),
   limit: z.number().int().min(1).max(500).default(100),
   eventTypes: z.array(EventTypeSchema).optional(),
   query: z.string().optional(),
@@ -230,7 +268,10 @@ export const ArtifactReadInputSchema = z.object({
   runId: z.string(),
   artifactId: z.string(),
   contentMode: z.enum(["metadata", "text", "base64"]).default("metadata"),
+  offset: z.number().int().min(0).default(0),
+  length: z.number().int().min(1).max(1_000_000).optional(),
   maxBytes: z.number().int().min(1).max(1_000_000).default(64_000),
+  allowRaw: z.boolean().default(false),
 });
 
 export const HelperTargetsInputSchema = z.object({});
@@ -348,6 +389,43 @@ export class SporesService {
         earlyStopSupported: false,
         stopMode: "timed_cap",
       },
+      primaryFlow: ready
+        ? [
+            {
+              step: "snapshot",
+              tool: "recorder_context_snapshot",
+              purpose: "List current displays, apps, windows, bounds, and snapshotId before choosing a target.",
+            },
+            {
+              step: "select",
+              tool: "recorder_target_select",
+              purpose: "Resolve app/window/title/bounds selectors into one target with alternatives.",
+            },
+            {
+              step: "validate",
+              tool: "recorder_target_validate",
+              purpose: "Check the selected target still exists and inspect the capture plan immediately before recording.",
+            },
+            {
+              step: "capture",
+              tool: "session_recording_capture",
+              purpose: "Preferred fixed-duration capture path; use synthetic only for tests.",
+            },
+            {
+              step: "review",
+              tool: "session_recording_result",
+              purpose: "Read bounded run summary, artifacts, timeline summaries, and replay anchors.",
+            },
+          ]
+        : [
+            {
+              step: "diagnose",
+              tool: doctor.helper.available ? "recorder_permissions_probe" : "spores_doctor",
+              purpose: doctor.helper.available
+                ? "Probe native permissions before recording."
+                : "Repair helper setup before requesting permissions.",
+            },
+          ],
       recommendedTools: ready
         ? [
           "recorder_context_snapshot",
@@ -383,11 +461,13 @@ export class SporesService {
       coordinateSpace: {
         unit: "screen_points",
         origin: "global_display_space",
+        sourceApi: targets.status.targetSource ?? "unknown",
+        captureUnit: "screen_points",
       },
-      displays,
-      apps,
-      windows,
-      activeWindow,
+      displays: displays.map((target) => withTargetLease(target, snapshotId)),
+      apps: apps.map((target) => withTargetLease(target, snapshotId)),
+      windows: windows.map((target) => withTargetLease(target, snapshotId)),
+      activeWindow: activeWindow ? withTargetLease(activeWindow, snapshotId) : undefined,
       counts: {
         displays: displays.length,
         apps: apps.length,
@@ -429,18 +509,33 @@ export class SporesService {
       recommendedRecordingArguments: {
         target: selector.kind === "region" || selector.bounds
           ? selector
-          : { targetId: selection.selected.targetId },
+          : { targetId: selection.selected.targetId, targetToken: selection.selected.targetToken },
       },
     };
   }
 
   async validateTarget(input: z.infer<typeof TargetValidateInputSchema>) {
     const targets = await this.targetsForSnapshot(input.snapshotId);
-    const target = targets.targets.find((candidate) => candidate.targetId === input.targetId);
+    const cachedTarget = targets.targets.find((candidate) => candidate.targetId === input.targetId);
+    const liveTargets = input.requireFresh ? await this.listTargets() : targets;
+    const liveTarget = liveTargets.targets.find((candidate) => candidate.targetId === input.targetId);
+    const target = liveTarget ?? cachedTarget;
     const invalidations: string[] = [];
     const warnings: string[] = [];
-    if (!target) {
+    if (!cachedTarget && input.snapshotId) {
+      invalidations.push("snapshot_target_not_found");
+    }
+    if (!liveTarget) {
       invalidations.push("target_not_found");
+    }
+    if (cachedTarget && liveTarget) {
+      invalidations.push(...targetFreshnessInvalidations(cachedTarget, liveTarget));
+    }
+    if (input.targetToken && liveTarget?.targetToken && input.targetToken !== liveTarget.targetToken) {
+      invalidations.push("target_token_changed");
+    }
+    if (cachedTarget?.targetToken && liveTarget?.targetToken && cachedTarget.targetToken !== liveTarget.targetToken) {
+      invalidations.push("target_token_changed");
     }
     if (target) {
       invalidations.push(...nativeCaptureBlockers(target));
@@ -453,8 +548,10 @@ export class SporesService {
       snapshotId: input.snapshotId,
       targetId: input.targetId,
       valid: invalidations.length === 0,
-      target,
-      invalidations,
+      target: target ? withTargetLease(target, input.snapshotId) : undefined,
+      cachedTarget: cachedTarget ? withTargetLease(cachedTarget, input.snapshotId) : undefined,
+      liveTarget,
+      invalidations: [...new Set(invalidations)],
       warnings,
       capturePlan: target ? capturePlanForTarget(target) : undefined,
     };
@@ -714,14 +811,35 @@ export class SporesService {
       observation: "agent.observation",
       assertion: "agent.assertion",
     }[input.kind] as SporesEvent["type"];
+    const custom = {
+      ...input.details,
+      ...input.custom,
+    };
+    const payload = AgentStepPayloadSchema.parse({
+      stepId: input.stepId,
+      kind: input.kind,
+      summary: input.summary,
+      rationale: input.rationale,
+      intent: input.intent,
+      basis: input.basis,
+      expectedOutcome: input.expectedOutcome,
+      confidence: input.confidence,
+      anchors: input.anchors,
+      causedBy: input.causedBy,
+      span: input.span,
+      toolCall: input.toolCall,
+      observation: input.observation,
+      assertion: input.assertion,
+      custom: Object.keys(custom).length > 0 ? custom : undefined,
+      hiddenCotStored: false,
+    });
     return this.appendEvent({
       runId: input.runId,
       type: eventType,
       payload: {
         ...input.details,
-        stepId: input.stepId,
-        summary: input.summary,
-        ...(input.assertion ? { assertion: input.assertion, ...input.assertion } : {}),
+        ...payload,
+        ...(input.assertion ? { ...input.assertion } : {}),
       },
     });
   }
@@ -746,7 +864,13 @@ export class SporesService {
         },
       });
     }
-    return this.readArtifact({ ...input, contentMode: "text", maxBytes: 64_000 });
+    return this.readArtifact({
+      ...input,
+      contentMode: "text",
+      offset: 0,
+      maxBytes: 64_000,
+      allowRaw: false,
+    });
   }
 
   async readArtifact(input: z.infer<typeof ArtifactReadInputSchema>) {
@@ -760,28 +884,119 @@ export class SporesService {
         requiresUserAction: false,
       });
     }
-    if (input.contentMode === "metadata") {
-      return { artifact };
-    }
-
-    const content = await readFile(artifact.path);
-    if (content.byteLength > input.maxBytes) {
+    const artifactPath = artifactPathForRead(manifest, artifact);
+    const linkStat = await lstat(artifactPath);
+    if (linkStat.isSymbolicLink()) {
       throw new SporesServiceError({
-        code: "artifact_too_large",
-        message: `Artifact ${artifact.artifactId} is ${content.byteLength} bytes, which exceeds maxBytes=${input.maxBytes}.`,
+        code: "artifact_path_unsafe",
+        message: `Artifact ${artifact.artifactId} points at a symbolic link, which is not readable through MCP.`,
+        retriable: false,
+        requiresUserAction: false,
+        details: { artifact: artifactForAgent(manifest, artifact) },
+      });
+    }
+    const artifactStat = await stat(artifactPath);
+    if (!artifactStat.isFile()) {
+      throw new SporesServiceError({
+        code: "artifact_not_readable",
+        message: `Artifact ${artifact.artifactId} is not a readable file.`,
+        retriable: false,
+        requiresUserAction: false,
+        details: { artifactId: artifact.artifactId },
+      });
+    }
+    if (input.contentMode === "metadata") {
+      return {
+        artifact: artifactForAgent(manifest, artifact),
+        bytes: artifactStat.size,
+        streamable: artifact.streamable ?? artifact.kind === "video",
+        seekable: artifact.seekable ?? artifact.kind === "video",
+      };
+    }
+    if ((artifact.redactionState === "raw" || artifact.redactionState === "quarantined" || artifact.redactionState === "failed") && !input.allowRaw) {
+      throw new SporesServiceError({
+        code: "artifact_requires_raw_access",
+        message: `Artifact ${artifact.artifactId} is ${artifact.redactionState}; read metadata or pass allowRaw for explicit raw access.`,
+        retriable: false,
+        requiresUserAction: true,
+        details: {
+          artifact: artifactForAgent(manifest, artifact),
+          recommendedContentMode: "metadata",
+          recoverySteps: ["Read artifact metadata first.", "Request explicit raw artifact access only when needed."],
+        },
+      });
+    }
+    if (input.contentMode === "text" && !artifactIsText(artifact)) {
+      throw new SporesServiceError({
+        code: "artifact_not_text",
+        message: `Artifact ${artifact.artifactId} is ${artifact.mediaType}; use metadata or base64 mode.`,
         retriable: false,
         requiresUserAction: false,
         details: {
-          artifact,
-          bytes: content.byteLength,
-          maxBytes: input.maxBytes,
+          artifact: artifactForAgent(manifest, artifact),
           recommendedContentMode: "metadata",
         },
       });
     }
+    if (input.offset > artifactStat.size) {
+      throw new SporesServiceError({
+        code: "artifact_range_not_satisfiable",
+        message: `Artifact ${artifact.artifactId} has ${artifactStat.size} bytes; offset ${input.offset} is outside the artifact.`,
+        retriable: false,
+        requiresUserAction: false,
+        details: {
+          artifact: artifactForAgent(manifest, artifact),
+          bytes: artifactStat.size,
+          offset: input.offset,
+        },
+      });
+    }
+
+    const remainingBytes = Math.max(0, artifactStat.size - input.offset);
+    const requestedBytes = Math.min(input.length ?? input.maxBytes, input.maxBytes, remainingBytes);
+    if (artifactStat.size > input.maxBytes && input.length === undefined) {
+      throw new SporesServiceError({
+        code: "artifact_too_large",
+        message: `Artifact ${artifact.artifactId} is ${artifactStat.size} bytes, which exceeds maxBytes=${input.maxBytes}.`,
+        retriable: false,
+        requiresUserAction: false,
+        details: {
+          artifact: artifactForAgent(manifest, artifact),
+          bytes: artifactStat.size,
+          maxBytes: input.maxBytes,
+          recommendedContentMode: "metadata",
+          nextTool: "session_recording_read_artifact",
+          nextArguments: {
+            runId: input.runId,
+            artifactId: artifact.artifactId,
+            contentMode: "metadata",
+          },
+        },
+      });
+    }
+    const content = await readArtifactRange(artifactPath, input.offset, requestedBytes);
+    const contentRange = {
+      offset: input.offset,
+      length: content.byteLength,
+      totalBytes: artifactStat.size,
+    };
     return input.contentMode === "base64"
-      ? { artifact, contentBase64: content.toString("base64"), encoding: "base64" }
-      : { artifact, content: content.toString("utf8"), encoding: "utf8" };
+      ? {
+          artifact: artifactForAgent(manifest, artifact),
+          contentBase64: content.toString("base64"),
+          encoding: "base64",
+          contentRange,
+          nextOffset: input.offset + content.byteLength < artifactStat.size ? input.offset + content.byteLength : undefined,
+          truncated: input.offset + content.byteLength < artifactStat.size,
+        }
+      : {
+          artifact: artifactForAgent(manifest, artifact),
+          content: content.toString("utf8"),
+          encoding: "utf8",
+          contentRange,
+          nextOffset: input.offset + content.byteLength < artifactStat.size ? input.offset + content.byteLength : undefined,
+          truncated: input.offset + content.byteLength < artifactStat.size,
+        };
   }
 
   async recordingResult(input: z.infer<typeof RecordingResultInputSchema>) {
@@ -827,6 +1042,10 @@ export class SporesService {
     const normalizedQuery = input.query?.trim().toLowerCase();
     const filtered = timeline.events
       .filter((event) => input.afterSequence === undefined || event.sequence > input.afterSequence)
+      .filter((event) => !input.stepId || eventStepId(event) === input.stepId)
+      .filter((event) => !input.spanId || eventSpanId(event) === input.spanId)
+      .filter((event) => !input.aroundEventId || event.eventId === input.aroundEventId)
+      .filter((event) => !input.anchorArtifactId || eventAnchors(event).some((anchor) => anchor.artifactId === input.anchorArtifactId))
       .filter((event) => !input.eventTypes || input.eventTypes.includes(event.type))
       .filter((event) => !normalizedQuery || eventSearchText(event).includes(normalizedQuery));
     const events = filtered.slice(0, input.limit);
@@ -845,8 +1064,12 @@ export class SporesService {
     };
   }
 
-  listTargets(_input: z.infer<typeof HelperTargetsInputSchema> = {}) {
-    return this.helper.listTargets();
+  async listTargets(_input: z.infer<typeof HelperTargetsInputSchema> = {}) {
+    const targets = await this.helper.listTargets();
+    return {
+      ...targets,
+      targets: targets.targets.map((target) => withTargetLease(target, undefined)),
+    };
   }
 
   permissionsStatus(_input: z.infer<typeof PermissionsStatusInputSchema> = {}) {
@@ -1137,7 +1360,7 @@ export class SporesService {
       });
     }
 
-    const targets = await this.helper.listTargets();
+    const targets = await this.listTargets();
     const selected = target?.targetId
       ? targets.targets.find((candidate) => candidate.targetId === target.targetId)
       : targets.targets[0];
@@ -1153,13 +1376,27 @@ export class SporesService {
       });
     }
 
+    const requested = stripTargetMode(target);
+    const invalidations = target && selected ? targetFreshnessInvalidations(requested as TargetRef, selected) : [];
+    if (target?.targetToken && selected.targetToken && target.targetToken !== selected.targetToken) {
+      invalidations.push("target_token_changed");
+    }
+    if (invalidations.length > 0 && target?.targetToken) {
+      throw new SporesServiceError({
+        code: "stale_target",
+        message: `Target ${selected.targetId} changed since selection: ${[...new Set(invalidations)].join(", ")}`,
+        retriable: true,
+        requiresUserAction: false,
+        details: {
+          targetId: selected.targetId,
+          invalidations: [...new Set(invalidations)],
+          recommendedTools: ["recorder_context_snapshot", "recorder_target_select", "recorder_target_validate"],
+        },
+      });
+    }
+
     return TargetRefSchema.parse({
       ...selected,
-      ...stripTargetMode(target),
-      targetId: target?.targetId ?? selected.targetId,
-      kind: target?.kind ?? selected.kind,
-      app: target?.app ?? selected.app,
-      window: target?.window ?? selected.window,
       safeToPersist: target?.safeToPersist ?? selected.safeToPersist,
     });
   }
@@ -1392,21 +1629,23 @@ async function recoverArtifact(input: {
   timeRangeMs: [number, number];
 }): Promise<ArtifactRef | undefined> {
   const artifactPath = input.path;
-  const [content, artifactStat] = await Promise.all([
-    readFile(artifactPath).catch(() => undefined),
-    stat(artifactPath).catch(() => undefined),
-  ]);
-  if (!content || !artifactStat?.isFile()) {
+  const artifactStat = await stat(artifactPath).catch(() => undefined);
+  if (!artifactStat?.isFile()) {
     return undefined;
   }
+  const sha256 = await hashFile(artifactPath);
 
   return ArtifactRefSchema.parse({
     artifactId: `${input.artifactIdPrefix}_${createHash("sha256").update(artifactPath).digest("hex").slice(0, 24)}`,
     kind: input.kind,
     path: artifactPath,
+    relativePath: path.basename(artifactPath),
+    streamable: input.kind === "video",
+    seekable: input.kind === "video",
+    durationMs: input.timeRangeMs[1] - input.timeRangeMs[0],
     mediaType: input.mediaType,
-    sha256: createHash("sha256").update(content).digest("hex"),
-    bytes: content.byteLength,
+    sha256,
+    bytes: artifactStat.size,
     createdAt: new Date(artifactStat.mtimeMs).toISOString(),
     timeRangeMs: input.timeRangeMs,
     redactionState: input.redactionState,
@@ -1609,12 +1848,158 @@ function nativeCaptureBlockers(target: TargetRef): string[] {
   return ["unsupported_target_kind"];
 }
 
+function withTargetLease(target: TargetRef, snapshotId: string | undefined): TargetRef {
+  const observedAt = nowIso();
+  return TargetRefSchema.parse({
+    ...target,
+    observedAt: target.observedAt ?? observedAt,
+    expiresAt: target.expiresAt ?? new Date(Date.parse(observedAt) + 30_000).toISOString(),
+    targetToken: target.targetToken ?? createHash("sha256").update(`${snapshotId ?? "live"}:${target.targetId}:${targetFingerprint(target)}`).digest("hex").slice(0, 24),
+    nativeWindowId: target.nativeWindowId ?? target.window?.id,
+    stableKey: target.stableKey ?? targetStableKey(target),
+    identityConfidence: target.identityConfidence ?? (target.targetId.startsWith("display:") ? "high" : "medium"),
+  });
+}
+
+function targetFreshnessInvalidations(cached: TargetRef, live: TargetRef): string[] {
+  const invalidations: string[] = [];
+  if (cached.kind !== live.kind) {
+    invalidations.push("kind_changed");
+  }
+  if (cached.displayId !== live.displayId) {
+    invalidations.push("display_changed");
+  }
+  if (cached.window?.title !== live.window?.title) {
+    invalidations.push("title_changed");
+  }
+  if (!boundsEqual(cached.bounds ?? cached.window?.bounds, live.bounds ?? live.window?.bounds)) {
+    invalidations.push("geometry_changed");
+  }
+  if ((cached.zOrder ?? 999_999) !== (live.zOrder ?? 999_999)) {
+    invalidations.push("z_order_changed");
+  }
+  return invalidations;
+}
+
+function targetFingerprint(target: TargetRef): string {
+  return JSON.stringify({
+    kind: target.kind,
+    displayId: target.displayId,
+    app: target.app?.bundleId ?? target.app?.name,
+    window: target.window?.id,
+    title: target.window?.title,
+    bounds: target.bounds ?? target.window?.bounds,
+  });
+}
+
+function targetStableKey(target: TargetRef): string | undefined {
+  if (target.kind === "display") {
+    return `display:${target.displayId ?? target.targetId}`;
+  }
+  if (target.app?.bundleId && target.window?.title) {
+    return `${target.app.bundleId}:${target.window.title}`;
+  }
+  if (target.app?.bundleId) {
+    return target.app.bundleId;
+  }
+  return undefined;
+}
+
+function boundsEqual(
+  left: z.infer<typeof BoundsSchema> | undefined,
+  right: z.infer<typeof BoundsSchema> | undefined,
+): boolean {
+  if (!left && !right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return left.x === right.x && left.y === right.y && left.width === right.width && left.height === right.height;
+}
+
 function isNumericWindowId(value: string | undefined): boolean {
   return Boolean(value && /^[1-9]\d*$/.test(value));
 }
 
+function artifactForAgent(manifest: RunManifest, artifact: ArtifactRef): ArtifactRef {
+  const relativePath = safeArtifactRelativePath(manifest, artifact);
+  return ArtifactRefSchema.parse({
+    ...artifact,
+    path: relativePath,
+    relativePath,
+  });
+}
+
+function safeArtifactRelativePath(manifest: RunManifest, artifact: ArtifactRef): string {
+  if (artifact.relativePath && !path.isAbsolute(artifact.relativePath) && !artifact.relativePath.split(/[\\/]/).includes("..")) {
+    return artifact.relativePath;
+  }
+  const relativePath = path.relative(path.resolve(manifest.paths.artifactsDir), path.resolve(artifact.path));
+  return isPathInside(relativePath) ? relativePath : artifact.artifactId;
+}
+
+function artifactPathForRead(manifest: RunManifest, artifact: ArtifactRef): string {
+  const artifactsRoot = path.resolve(manifest.paths.artifactsDir);
+  const artifactPath = path.resolve(
+    artifact.relativePath && !path.isAbsolute(artifact.relativePath)
+      ? path.join(artifactsRoot, artifact.relativePath)
+      : artifact.path,
+  );
+  const relativePath = path.relative(artifactsRoot, artifactPath);
+  if (!isPathInside(relativePath)) {
+    throw new SporesServiceError({
+      code: "artifact_path_outside_run",
+      message: `Artifact ${artifact.artifactId} is outside the run artifacts directory.`,
+      retriable: false,
+      requiresUserAction: false,
+      details: {
+        artifactId: artifact.artifactId,
+        relativePath: artifact.relativePath,
+      },
+    });
+  }
+  return artifactPath;
+}
+
+function isPathInside(relativePath: string): boolean {
+  return relativePath.length === 0 || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+}
+
+async function readArtifactRange(filePath: string, offset: number, length: number): Promise<Buffer> {
+  if (length <= 0) {
+    return Buffer.alloc(0);
+  }
+  const file = await open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    const result = await file.read(buffer, 0, length, offset);
+    return buffer.subarray(0, result.bytesRead);
+  } finally {
+    await file.close();
+  }
+}
+
+async function hashFile(filePath: string): Promise<string> {
+  const { createReadStream } = await import("node:fs");
+  const hash = createHash("sha256");
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => {
+      hash.update(chunk);
+    });
+    stream.on("error", reject);
+    stream.on("end", resolve);
+  });
+  return hash.digest("hex");
+}
+
+function artifactIsText(artifact: ArtifactRef): boolean {
+  return artifact.kind === "text" || artifact.mediaType.startsWith("text/");
+}
+
 function artifactIsSmallText(artifact: ArtifactRef): boolean {
-  return (artifact.kind === "text" || artifact.mediaType.startsWith("text/")) && artifact.bytes <= 64_000;
+  return artifactIsText(artifact) && artifact.bytes <= 64_000;
 }
 
 async function verifyArtifact(artifact: ArtifactRef): Promise<{
@@ -1628,23 +2013,23 @@ async function verifyArtifact(artifact: ArtifactRef): Promise<{
   error?: string;
 }> {
   try {
-    const [content, artifactStat] = await Promise.all([
-      readFile(artifact.path),
-      stat(artifact.path),
-    ]);
-    const sha256 = createHash("sha256").update(content).digest("hex");
+    const artifactStat = await stat(artifact.path);
+    if (!artifactStat.isFile()) {
+      throw new Error(`artifact is not a file: ${artifact.artifactId}`);
+    }
+    const sha256 = await hashFile(artifact.path);
     const checks = {
       exists: artifactStat.isFile(),
-      bytesMatch: artifact.bytes === content.byteLength,
+      bytesMatch: artifact.bytes === artifactStat.size,
       sha256Match: artifact.sha256 === sha256,
-      nonEmpty: content.byteLength > 0,
+      nonEmpty: artifactStat.size > 0,
     };
     return {
       artifact,
       verified: Object.values(checks).every(Boolean),
       checks,
       actual: {
-        bytes: content.byteLength,
+        bytes: artifactStat.size,
         sha256,
       },
     };
@@ -1684,7 +2069,8 @@ function summarizeTimeline(events: SporesEvent[], frames: FrameRef[], artifacts:
       kind: artifact.kind,
       mediaType: artifact.mediaType,
       bytes: artifact.bytes,
-      path: artifact.path,
+      relativePath: artifact.relativePath ?? path.basename(artifact.path),
+      redactionState: artifact.redactionState,
       timeRangeMs: artifact.timeRangeMs,
     })),
   };
@@ -1718,9 +2104,27 @@ function enrichEvent(
           artifactId: artifact.artifactId,
           kind: artifact.kind,
           mediaType: artifact.mediaType,
-          path: artifact.path,
+          relativePath: artifact.relativePath ?? path.basename(artifact.path),
+          redactionState: artifact.redactionState,
         }
       : undefined,
+    replay: replayRefForEvent(event, frame, artifact),
+  };
+}
+
+function replayRefForEvent(event: SporesEvent, frame: FrameRef | undefined, artifact: ArtifactRef | undefined) {
+  const anchors = eventAnchors(event);
+  return {
+    eventUrl: `spores://runs/${event.runId}/events/${event.eventId}`,
+    seek: frame
+      ? {
+          artifactId: frame.artifactId ?? artifact?.artifactId,
+          videoTimeMs: frame.videoTimeMs,
+          prerollMs: 350,
+        }
+      : undefined,
+    anchors,
+    causalLinks: eventCausalLinks(event),
   };
 }
 
@@ -1794,13 +2198,88 @@ function eventSummary(event: SporesEvent): string {
 }
 
 function eventSearchText(event: SporesEvent): string {
-  return `${event.type} ${event.source} ${eventSummary(event)} ${JSON.stringify(event.payload)}`.toLowerCase();
+  const safeParts = [
+    event.type,
+    event.source,
+    eventSummary(event),
+    eventStepId(event),
+    eventSpanId(event),
+    ...eventAnchors(event).map((anchor) => [anchor.label, anchor.artifactId, anchor.frameId].filter(Boolean).join(" ")),
+  ];
+  return safeParts.filter((part): part is string => typeof part === "string" && part.length > 0).join(" ").toLowerCase();
+}
+
+function eventStepId(event: SporesEvent): string | undefined {
+  return typeof event.payload.stepId === "string" ? event.payload.stepId : undefined;
+}
+
+function eventSpanId(event: SporesEvent): string | undefined {
+  const span = event.payload.span;
+  return span && typeof span === "object" && "spanId" in span && typeof span.spanId === "string"
+    ? span.spanId
+    : undefined;
+}
+
+function eventAnchors(event: SporesEvent): Array<z.infer<typeof TraceAnchorSchema>> {
+  const anchors = event.payload.anchors;
+  if (!Array.isArray(anchors)) {
+    return [];
+  }
+  return anchors.flatMap((anchor) => {
+    const parsed = TraceAnchorSchema.safeParse(anchor);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function eventCausalLinks(event: SporesEvent): Array<z.infer<typeof CausalLinkSchema>> {
+  const links = event.payload.causedBy;
+  if (!Array.isArray(links)) {
+    return [];
+  }
+  return links.flatMap((link) => {
+    const parsed = CausalLinkSchema.safeParse(link);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function nearestFrameByVideoTime(videoTimeMs: number, frames: FrameRef[]): FrameRef | undefined {
+  return [...frames].sort((left, right) => (
+    Math.abs(left.videoTimeMs - videoTimeMs) - Math.abs(right.videoTimeMs - videoTimeMs)
+  ))[0];
 }
 
 function nearestFrame(event: SporesEvent, frames: FrameRef[]): FrameRef | undefined {
+  const payload = event.payload;
+  const frameId = typeof payload.frameId === "string"
+    ? payload.frameId
+    : payload.frameRef && typeof payload.frameRef === "object" && "frameId" in payload.frameRef && typeof payload.frameRef.frameId === "string"
+    ? payload.frameRef.frameId
+    : undefined;
+  if (frameId) {
+    const exact = frames.find((frame) => frame.frameId === frameId);
+    if (exact) {
+      return exact;
+    }
+  }
+  const anchors = eventAnchors(event);
+  for (const anchor of anchors) {
+    if (anchor.frameId) {
+      const exact = frames.find((frame) => frame.frameId === anchor.frameId);
+      if (exact) {
+        return exact;
+      }
+    }
+    if (anchor.videoTimeMs !== undefined) {
+      return nearestFrameByVideoTime(anchor.videoTimeMs, frames);
+    }
+  }
+  const videoTimeMs = typeof payload.videoTimeMs === "number" ? payload.videoTimeMs : undefined;
+  if (videoTimeMs !== undefined) {
+    return nearestFrameByVideoTime(videoTimeMs, frames);
+  }
   return [...frames]
-    .filter((frame) => frame.sequence <= event.sequence)
-    .sort((left, right) => right.sequence - left.sequence)[0] ?? frames[0];
+    .filter((frame) => frame.monotonicTimeNs <= event.monotonicTimeNs)
+    .sort((left, right) => right.monotonicTimeNs - left.monotonicTimeNs)[0] ?? frames[0];
 }
 
 async function readSmallTextArtifacts(artifacts: ArtifactRef[]): Promise<Array<{

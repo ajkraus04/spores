@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -9,12 +9,18 @@ import {
   FrameRefSchema,
   RunManifestSchema,
   SporesEventSchema,
+  TargetRef,
   TimelineSchema,
 } from "@spores/schema";
+import { RunStore } from "@spores/store";
 import { createSporesService } from "../../apps/sporesd/src/service.js";
 
 let tempDir: string;
-const itIfNativeScreenCapture = process.platform === "darwin" && existsSync("/usr/sbin/screencapture") ? it : it.skip;
+const itIfNativeScreenCapture = process.env.SPORES_TEST_NATIVE_CAPTURE === "1" &&
+  process.platform === "darwin" &&
+  existsSync("/usr/sbin/screencapture")
+  ? it
+  : it.skip;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(path.join(os.tmpdir(), "spores-bundle-e2e-"));
@@ -25,6 +31,69 @@ afterEach(async () => {
 });
 
 describe("run bundle e2e validation", () => {
+  it("rejects unsafe run ids and artifact relative paths before writing outside the store", async () => {
+    const store = new RunStore(path.join(tempDir, "runs"));
+
+    await expect(store.createRun({
+      runId: "../run_escape",
+      target: fakeTarget("target_unsafe_run_id"),
+    })).rejects.toThrow(/invalid runId/);
+    expect(existsSync(path.join(tempDir, "run_escape"))).toBe(false);
+    expect(() => store.pathsForRun("run/escape")).toThrow(/invalid runId/);
+
+    const manifest = await store.createRun({
+      runId: "run_path_safety_001",
+      target: fakeTarget("target_path_safety"),
+    });
+
+    await expect(store.writeArtifact(manifest.runId, "../escape.txt", "unsafe")).rejects.toThrow(/unsafe segment/);
+    await expect(store.writeArtifact(manifest.runId, "nested/../escape.txt", "unsafe")).rejects.toThrow(/unsafe segment/);
+    await expect(store.writeArtifact(manifest.runId, "/tmp/spores-escape.txt", "unsafe")).rejects.toThrow(/absolute/);
+    await expect(store.writeArtifact(manifest.runId, "", "unsafe")).rejects.toThrow(/non-empty/);
+
+    const artifact = await store.writeArtifact(manifest.runId, "nested/capture.txt", "safe");
+    expect(artifact.path).toBe(path.join(manifest.paths.artifactsDir, "nested", "capture.txt"));
+    expect(await readFile(artifact.path, "utf8")).toBe("safe");
+    expect(existsSync(path.join(tempDir, "escape.txt"))).toBe(false);
+  });
+
+  it("rejects manifests whose stored paths or artifact paths escape the run bundle", async () => {
+    const store = new RunStore(path.join(tempDir, "runs"));
+    const target = fakeTarget("target_tampered_manifest");
+
+    const pathTamperRun = await store.createRun({
+      runId: "run_tampered_paths_001",
+      target,
+    });
+    await writeFile(pathTamperRun.paths.manifest, `${JSON.stringify({
+      ...pathTamperRun,
+      paths: {
+        ...pathTamperRun.paths,
+        events: path.join(tempDir, "outside-events.ndjson"),
+      },
+    }, null, 2)}\n`);
+
+    await expect(store.readManifest(pathTamperRun.runId)).rejects.toThrow(/paths\.events/);
+
+    const artifactTamperRun = await store.createRun({
+      runId: "run_tampered_artifact_001",
+      target,
+    });
+    const artifact = await store.writeArtifact(artifactTamperRun.runId, "capture.txt", "safe");
+    const artifactTamperManifest = await store.readManifest(artifactTamperRun.runId);
+    await writeFile(artifactTamperManifest.paths.manifest, `${JSON.stringify({
+      ...artifactTamperManifest,
+      artifacts: [
+        {
+          ...artifact,
+          path: path.join(tempDir, "outside-artifact.txt"),
+        },
+      ],
+    }, null, 2)}\n`);
+
+    await expect(store.readManifest(artifactTamperRun.runId)).rejects.toThrow(/artifact path/);
+  });
+
   it("selects helper-listed target ids without requiring picker mode", async () => {
     const runId = "run_helper_target_e2e_001";
     const service = createSporesService({ rootDir: path.join(tempDir, "runs") });
@@ -358,4 +427,18 @@ function parseNdjson<T>(raw: string, parse: (value: unknown) => T): T[] {
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => parse(JSON.parse(line)));
+}
+
+function fakeTarget(targetId: string): TargetRef {
+  return {
+    targetId,
+    kind: "fake",
+    app: { name: "Path Safety Test", bundleId: "dev.spores.path-safety", processId: process.pid },
+    window: {
+      id: "window_path_safety",
+      title: "Path Safety",
+      bounds: { x: 0, y: 0, width: 640, height: 480 },
+    },
+    safeToPersist: true,
+  };
 }

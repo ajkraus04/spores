@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import {
   AppendAgentStepInputSchema,
@@ -30,6 +31,50 @@ afterEach(async () => {
 });
 
 describe("sporesd tool handlers", () => {
+  it("exposes concrete output schemas and agent-facing metadata for primary tools", () => {
+    const service = createSporesService({ rootDir: path.join(tempDir, "runs") });
+    const tools = new Map(createToolDefinitions(service).map((tool) => [tool.name, tool]));
+    const expectedSchemaKeys = {
+      spores_doctor: ["ok", "recorder", "helper"],
+      recorder_ready: ["ready", "readinessLevel", "permissions", "recommendedTools"],
+      recorder_context_snapshot: ["snapshotId", "coordinateSpace", "counts", "windows"],
+      recorder_target_select: ["selected", "confidence", "ambiguous", "recommendedRecordingArguments"],
+      recorder_target_validate: ["targetId", "valid", "invalidations", "capturePlan"],
+      session_recording_begin: ["runId", "status", "selection", "timing"],
+      session_recording_capture: ["runId", "status", "target", "artifact", "timeline", "result"],
+      session_recording_start: ["runId", "sessionId", "status", "target", "artifacts"],
+      session_recording_stop: ["runId", "sessionId", "status", "artifacts"],
+      session_recording_query_timeline: ["runId", "events", "summary"],
+      session_recording_result: ["runId", "status", "artifacts", "timeline"],
+      session_recording_read_artifact: ["artifact", "content", "contentBase64", "encoding"],
+    } as const;
+
+    for (const [toolName, requiredKeys] of Object.entries(expectedSchemaKeys)) {
+      const tool = tools.get(toolName);
+      expect(tool).toBeDefined();
+      expect(tool!.title.length).toBeGreaterThan(0);
+      expect(tool!.role.length).toBeGreaterThan(0);
+      expect(objectSchemaKeys(tool!.outputSchema)).toEqual(expect.arrayContaining([...requiredKeys]));
+    }
+
+    expect(tools.get("recorder_ready")).toMatchObject({
+      title: "Recorder Readiness",
+      role: "diagnostic",
+      readOnly: true,
+    });
+    expect(tools.get("session_recording_capture")).toMatchObject({
+      title: "Capture Recording",
+      role: "recording",
+      destructive: false,
+    });
+    expect(tools.get("session_recording_stop")).toMatchObject({
+      title: "Stop Recording Session",
+      role: "recording",
+      destructive: false,
+      idempotent: true,
+    });
+  });
+
   it("runs start, append, stop, and timeline without an MCP transport", async () => {
     const service = createSporesService({ rootDir: path.join(tempDir, "runs") });
     const tools = new Map(createToolDefinitions(service).map((tool) => [tool.name, tool]));
@@ -50,21 +95,25 @@ describe("sporesd tool handlers", () => {
     } as never);
 
     expect(started).toMatchObject({ runId: "run_tools_001", status: "recording" });
+    expectSchemaParse(start!.outputSchema, started);
 
-    await append!.execute({
+    const appended = await append!.execute({
       runId: "run_tools_001",
       type: "agent.assertion",
       payload: { expected: "tools work", actual: "tools work", status: "passed" },
     } as never);
+    expectSchemaParse(append!.outputSchema, appended);
 
     const stopped = await stop!.execute({ runId: "run_tools_001" } as never);
     expect(stopped).toMatchObject({ runId: "run_tools_001", status: "complete" });
+    expectSchemaParse(stop!.outputSchema, stopped);
 
     const result = await timeline!.execute({ runId: "run_tools_001" } as never);
     expect(result).toMatchObject({
       runId: "run_tools_001",
       status: "complete",
     });
+    expectSchemaParse(timeline!.outputSchema, result);
     expect((result as { events: unknown[] }).events).toHaveLength(10);
   }, 20_000);
 
@@ -84,6 +133,7 @@ describe("sporesd tool handlers", () => {
         maxDurationSeconds: 30,
       },
     });
+    expectSchemaParse(tools.get("recorder_ready")!.outputSchema, ready);
 
     const resolved = await tools.get("recorder_target_resolve")!.execute({
       targetId: "display:main",
@@ -92,6 +142,7 @@ describe("sporesd tool handlers", () => {
       selected: { targetId: "display:main", kind: "display" },
       confidence: "high",
     });
+    expectSchemaParse(tools.get("recorder_target_resolve")!.outputSchema, resolved);
 
     const begun = await tools.get("session_recording_begin")!.execute({
       runId: "run_tools_begin_001",
@@ -109,9 +160,11 @@ describe("sporesd tool handlers", () => {
         safetyCapSeconds: 1,
       },
     });
+    expectSchemaParse(tools.get("session_recording_begin")!.outputSchema, begun);
 
     const stopped = await tools.get("session_recording_stop")!.execute({ runId: "run_tools_begin_001" } as never);
     expect(stopped).toMatchObject({ runId: "run_tools_begin_001", status: "complete" });
+    expectSchemaParse(tools.get("session_recording_stop")!.outputSchema, stopped);
   }, 20_000);
 
   it("supports the preferred agent capture, result, query, and bounded artifact tools", async () => {
@@ -119,6 +172,7 @@ describe("sporesd tool handlers", () => {
     const tools = new Map(createToolDefinitions(service).map((tool) => [tool.name, tool]));
 
     const snapshot = await tools.get("recorder_context_snapshot")!.execute({} as never);
+    expectSchemaParse(tools.get("recorder_context_snapshot")!.outputSchema, snapshot);
     expect(snapshot).toMatchObject({
       coordinateSpace: {
         unit: "screen_points",
@@ -132,6 +186,7 @@ describe("sporesd tool handlers", () => {
     const selected = await tools.get("recorder_target_select")!.execute({
       selector: { targetId: "display:main" },
     } as never);
+    expectSchemaParse(tools.get("recorder_target_select")!.outputSchema, selected);
     expect(selected).toMatchObject({
       selected: { targetId: "display:main", kind: "display" },
       confidence: "high",
@@ -142,6 +197,7 @@ describe("sporesd tool handlers", () => {
     const validated = await tools.get("recorder_target_validate")!.execute({
       targetId: "display:main",
     } as never);
+    expectSchemaParse(tools.get("recorder_target_validate")!.outputSchema, validated);
     expect(validated).toMatchObject({
       valid: true,
       target: { targetId: "display:main" },
@@ -159,6 +215,7 @@ describe("sporesd tool handlers", () => {
         verifyArtifacts: true,
       },
     } as never);
+    expectSchemaParse(tools.get("session_recording_capture")!.outputSchema, captured);
     expect(captured).toMatchObject({
       runId: "run_agent_capture_tools_001",
       status: "complete",
@@ -196,6 +253,7 @@ describe("sporesd tool handlers", () => {
       includePayloads: true,
       limit: 10,
     } as never);
+    expectSchemaParse(tools.get("session_recording_query_timeline")!.outputSchema, query);
     expect(query).toMatchObject({
       runId: "run_agent_capture_tools_001",
       events: [
@@ -216,6 +274,7 @@ describe("sporesd tool handlers", () => {
       includeTimeline: "events",
       includeSmallTextArtifacts: true,
     } as never);
+    expectSchemaParse(tools.get("session_recording_result")!.outputSchema, result);
     expect(result).toMatchObject({
       runId: "run_agent_capture_tools_001",
       timeline: {
@@ -236,14 +295,22 @@ describe("sporesd tool handlers", () => {
       runId: "run_agent_capture_tools_001",
       artifactId,
       contentMode: "metadata",
+      offset: 0,
+      maxBytes: 64_000,
+      allowRaw: false,
     } as never);
+    expectSchemaParse(tools.get("session_recording_read_artifact")!.outputSchema, metadata);
     expect(metadata).toMatchObject({ artifact: { artifactId } });
 
     const text = await tools.get("session_recording_read_artifact")!.execute({
       runId: "run_agent_capture_tools_001",
       artifactId,
       contentMode: "text",
+      offset: 0,
+      maxBytes: 64_000,
+      allowRaw: false,
     } as never);
+    expectSchemaParse(tools.get("session_recording_read_artifact")!.outputSchema, text);
     expect(text).toMatchObject({
       content: "Spores helper synthetic capture for run_agent_capture_tools_001\n",
       encoding: "utf8",
@@ -253,7 +320,11 @@ describe("sporesd tool handlers", () => {
       runId: "run_agent_capture_tools_001",
       artifactId,
       contentMode: "base64",
+      offset: 0,
+      maxBytes: 64_000,
+      allowRaw: false,
     } as never);
+    expectSchemaParse(tools.get("session_recording_read_artifact")!.outputSchema, base64);
     expect(base64).toMatchObject({
       contentBase64: Buffer.from("Spores helper synthetic capture for run_agent_capture_tools_001\n").toString("base64"),
       encoding: "base64",
@@ -303,6 +374,7 @@ describe("sporesd tool handlers", () => {
     await expect(service.validateTarget({
       snapshotId: "snap_missing",
       targetId: "window:first",
+      requireFresh: true,
     })).rejects.toMatchObject({
       code: "stale_target_snapshot",
       retriable: true,
@@ -342,7 +414,7 @@ describe("sporesd tool handlers", () => {
     });
     expect(selected.ambiguous).toBe(true);
     expect(selected.alternatives[0]!.target.targetId).toBe("window:chrome:2");
-    expect(selected.recommendedRecordingArguments).toEqual({ target: { targetId: "window:chrome:1" } });
+    expect(selected.recommendedRecordingArguments).toMatchObject({ target: { targetId: "window:chrome:1" } });
     expect(selected.alternatives).toHaveLength(1);
   });
 
@@ -361,7 +433,7 @@ describe("sporesd tool handlers", () => {
       ]),
     });
 
-    const validation = await service.validateTarget({ targetId: "app:no-bounds" });
+    const validation = await service.validateTarget({ targetId: "app:no-bounds", requireFresh: true });
     expect(validation).toMatchObject({
       valid: false,
       invalidations: ["missing_bounds"],
@@ -571,4 +643,18 @@ function windowTarget(targetId: string, zOrder: number, title: string): TargetRe
     },
     safeToPersist: true,
   });
+}
+
+function objectSchemaKeys(schema: z.ZodType): string[] {
+  if (!(schema instanceof z.ZodObject)) {
+    throw new Error(`expected object output schema, got ${schema.constructor.name}`);
+  }
+  return Object.keys(schema.shape);
+}
+
+function expectSchemaParse(schema: z.ZodType, value: unknown): void {
+  const result = schema.safeParse(value);
+  if (!result.success) {
+    throw new Error(z.prettifyError(result.error));
+  }
 }
