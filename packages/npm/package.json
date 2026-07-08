@@ -1,0 +1,25 @@
+{
+  "name": "spores",
+  "version": "0.1.0",
+  "description": "MCP-first desktop recording for agents.",
+  "type": "module",
+  "bin": {
+    "spores": "./dist/spores.js",
+    "sporesd": "./dist/sporesd.js",
+    "spores-recorder-helper": "./dist/spores-recorder-helper.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun ../../scripts/build-npm-package.mjs",
+    "prepack": "bun run build"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

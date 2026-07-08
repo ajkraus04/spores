@@ -56,6 +56,72 @@ design targets and should not be treated as implemented behavior.
 - Screen Recording and Accessibility permissions for the terminal/app that
   launches Spores
 
+## Run Without Cloning
+
+Use the installable package when an agent or MCP client should start Spores
+without a local checkout:
+
+```bash
+npx spores setup --json
+bunx spores setup --json
+```
+
+Start the MCP server from the package:
+
+```bash
+npx --yes spores mcp
+bunx spores mcp
+```
+
+Recommended MCP server config using `npx`:
+
+```json
+{
+  "mcpServers": {
+    "spores": {
+      "command": "npx",
+      "args": ["--yes", "spores", "mcp"]
+    }
+  }
+}
+```
+
+Equivalent config using `bunx`:
+
+```json
+{
+  "mcpServers": {
+    "spores": {
+      "command": "bunx",
+      "args": ["spores", "mcp"]
+    }
+  }
+}
+```
+
+Use `SPORES_RUNS_ROOT` in the MCP config `env` field to choose where local run
+bundles are written.
+
+For package release validation from this checkout:
+
+```bash
+bun run build:npm
+bun run pack:npm
+```
+
+The published package exposes these executables:
+
+```text
+spores
+sporesd
+spores-recorder-helper
+```
+
+`npx spores@setup` is not the intended interface. That would require a mutable
+npm dist-tag named `setup`; use the stable `spores setup` subcommand instead.
+
+## Source Checkout
+
 Install dependencies:
 
 ```bash
@@ -77,7 +143,7 @@ SPORES_TEST_NATIVE_CAPTURE=1 bun run test:native
 
 ## Start The MCP Server
 
-Agents should use Spores through MCP over stdio:
+From a source checkout, agents should use Spores through MCP over stdio:
 
 ```bash
 bun run --silent mcp

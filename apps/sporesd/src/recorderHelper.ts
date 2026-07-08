@@ -81,16 +81,11 @@ export class RecorderHelperClient {
   private readonly sessionHelpers = new Map<string, RecorderHelperProcess>();
 
   constructor(config: Partial<RecorderHelperConfig> = {}, env: NodeJS.ProcessEnv = process.env) {
+    const defaultLaunch = resolveDefaultHelperLaunch();
     this.config = {
-      command: config.command ?? env.SPORES_RECORDER_HELPER_COMMAND ?? env.SPORES_RECORDER_HELPER_CMD ?? "bun",
-      args: config.args ?? parseArgList(env.SPORES_RECORDER_HELPER_ARGS) ?? [
-        "run",
-        "--silent",
-        "recorder-helper",
-        "--",
-        "--stdio",
-      ],
-      cwd: config.cwd ?? env.SPORES_RECORDER_HELPER_CWD ?? findDefaultHelperCwd() ?? process.cwd(),
+      command: config.command ?? env.SPORES_RECORDER_HELPER_COMMAND ?? env.SPORES_RECORDER_HELPER_CMD ?? defaultLaunch.command,
+      args: config.args ?? parseArgList(env.SPORES_RECORDER_HELPER_ARGS) ?? defaultLaunch.args,
+      cwd: config.cwd ?? env.SPORES_RECORDER_HELPER_CWD ?? defaultLaunch.cwd,
       env: config.env ?? env,
       timeoutMs: config.timeoutMs ?? Number(env.SPORES_RECORDER_HELPER_TIMEOUT_MS ?? 45_000),
     };
@@ -283,13 +278,24 @@ export class RecorderHelperClient {
       timeoutMs: this.config.timeoutMs,
       executablePresent: executablePresent(this.config.command, this.config.env),
       cwdPackageJsonPresent: existsSync(path.join(this.config.cwd, "package.json")),
-      suggestedCommands: [
-        `cd ${this.config.cwd}`,
-        "bun install",
-        "bun run --silent recorder-helper -- --stdio",
-        "bun run --silent mcp:doctor -- --json",
-      ],
+      suggestedCommands: this.suggestedCommands(),
     };
+  }
+
+  private suggestedCommands(): string[] {
+    if (this.config.command === process.execPath && this.config.args.some((arg) => arg.endsWith("spores-recorder-helper.js"))) {
+      return [
+        `${this.config.command} ${this.config.args.join(" ")}`,
+        "npx spores setup --json",
+        "bunx spores setup --json",
+      ];
+    }
+    return [
+      `cd ${this.config.cwd}`,
+      "bun install",
+      "bun run --silent recorder-helper -- --stdio",
+      "bun run --silent mcp:doctor -- --json",
+    ];
   }
 
   private createProcess(): RecorderHelperProcess {
@@ -507,6 +513,23 @@ export function createRecorderHelperClient(env: NodeJS.ProcessEnv = process.env)
   return new RecorderHelperClient({}, env);
 }
 
+function resolveDefaultHelperLaunch(): Pick<RecorderHelperConfig, "command" | "args" | "cwd"> {
+  const packagedHelper = findPackagedHelperEntrypoint();
+  if (packagedHelper) {
+    return {
+      command: process.execPath,
+      args: [packagedHelper, "--stdio"],
+      cwd: path.dirname(packagedHelper),
+    };
+  }
+
+  return {
+    command: "bun",
+    args: ["run", "--silent", "recorder-helper", "--", "--stdio"],
+    cwd: findDefaultHelperCwd() ?? process.cwd(),
+  };
+}
+
 function parseArgList(value: string | undefined): string[] | undefined {
   if (!value || value.trim().length === 0) {
     return undefined;
@@ -530,6 +553,21 @@ function findDefaultHelperCwd(): string | undefined {
       break;
     }
     current = parent;
+  }
+  return undefined;
+}
+
+function findPackagedHelperEntrypoint(): string | undefined {
+  const currentFile = fileURLToPath(import.meta.url);
+  const currentDir = path.dirname(currentFile);
+  const candidates = [
+    path.join(currentDir, "spores-recorder-helper.js"),
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate !== currentFile && existsSync(candidate)) {
+      return candidate;
+    }
   }
   return undefined;
 }
